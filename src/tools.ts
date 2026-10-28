@@ -22,6 +22,7 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
+import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import {
   applyBoardEvent, BOARD_EXTENT, describeBoard, DRAW_EVENT, MAX_OBJECTS, MAX_SHAPES,
   PALETTE_TOKENS, SCENE_EVENT, shapeIds,
@@ -31,8 +32,10 @@ import {
   type Scene3DEvent, type Shape2D, type ShapePatch, type ShapeStyle, type TextShape, type Vec2, type Vec3,
   type View3DPatch,
 } from './scene.ts'
-import { DRAW_TOOL, READ_TOOL, SCENE_TOOL } from './shared.ts'
+import { DRAW_TOOL, API_TOOL, LOOK_TOOL, READ_TOOL, SCENE_TOOL, type CaptureOptions } from './shared.ts'
 import type { BoardStore } from './board-store.ts'
+import type { AttachedImage, CaptureService, FrameStore, SavedFrame } from './capture.ts'
+import { buildManifest } from './manifest.ts'
 
 /** Upper bound on operations one call may carry. */
 const MAX_BATCH = 64
@@ -60,6 +63,20 @@ const OBJECT_KINDS = ['box', 'sphere', 'cylinder', 'cone', 'torus', 'plane'] as 
 
 /** Light kinds a 3D view may declare. */
 const LIGHT_KINDS = ['ambient', 'directional', 'point'] as const
+
+/**
+ * Host services the board tools need beyond the store. They stay optional so a
+ * composition without the capture channel (or a schema-only test) still builds
+ * the three authoring tools; `whiteboard_look` then explains that it is not wired.
+ */
+export interface BoardToolServices {
+  /** Correlates `whiteboard_look` with the open panel. */
+  readonly captures: CaptureService
+  /** Durable PNG storage for captured frames. */
+  readonly frames: FrameStore
+  /** Optional frame → durable image attachment (inline image in the result). */
+  readonly attachImage: (frame: SavedFrame, name: string) => Promise<AttachedImage | undefined>
+}
 
 /** Hex paint: `#rgb`, `#rrggbb`, `#rrggbbaa`. */
 const HEX_PAINT = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/
@@ -423,12 +440,6 @@ function census(board: BoardState): string {
     + `scene ${board.scene.objects.length} object${board.scene.objects.length === 1 ? '' : 's'}`
 }
 
-/** Format one `[x, y, z]` vector with one decimal, for read output. */
-function formatVec(value: Vec3): string {
-  return `(${value.map(axis => Math.round(axis * 10) / 10).join(', ')})`
-}
-
-
 /**
  * The board key for one tool call: the whiteboard Session id (`Agent.id` IS the
  * session id, so no session object is touched).
@@ -463,6 +474,10 @@ const BATCH_OUTPUT = {
     removed: { type: 'array', items: { type: 'string' }, required: true, description: 'Ids deleted by this call.' },
     counts: { type: 'string', required: true, description: 'Board census after this call.' },
     summary: { type: 'string', required: true, description: 'One line: what changed, with ids.' },
+    frame: {
+      type: 'string',
+      description: 'Absolute PNG path of a frame captured after this call, when the 画板 panel was on screen.',
+    },
   },
 } as const
 
@@ -474,11 +489,15 @@ interface BatchResult {
   removed: string[]
   counts: string
   summary: string
+  frame?: string
 }
 
 /** Render one batch result as its single model-facing line. */
 function batchRender(_args: unknown, value: Readonly<BatchResult>): { type: 'text'; text: string }[] {
-  return [{ type: 'text', text: value.summary }]
+  const frame = value.frame === undefined
+    ? ''
+    : ` Frame captured: ${value.frame} (open it with read_image, or call whiteboard_look for measurements).`
+  return [{ type: 'text', text: value.summary + frame }]
 }
 
 /** Describe a change list for the result line. */
@@ -489,6 +508,272 @@ function changeSummary(tool: string, added: string[], updated: string[], removed
   if (removed.length > 0) parts.push(`removed ${removed.join(', ')}`)
   const changed = parts.length === 0 ? 'no changes' : parts.join('; ')
   return `${tool}: ${changed} — ${counts}.`
+}
+
+/** Axis-aligned 2D bounds, in logical board units. */
+interface Bounds2 { x1: number; y1: number; x2: number; y2: number }
+
+/** Axis-aligned 3D bounds, in world units. */
+interface Bounds3 { min: Vec3; max: Vec3 }
+
+/**
+ * Rough axis-aligned bounds of one 2D shape. Rotation is ignored and an SVG
+ * `path` has no cheap box; both are the honest limits of a text summary.
+ * @param shape - shape to measure.
+ * @returns the box, or undefined when the geometry cannot be cheaply bounded.
+ */
+function shapeBounds(shape: Shape2D): Bounds2 | undefined {
+  switch (shape.kind) {
+    case 'rect':
+      return { x1: shape.x, y1: shape.y, x2: shape.x + shape.w, y2: shape.y + shape.h }
+    case 'ellipse':
+      return { x1: shape.cx - shape.rx, y1: shape.cy - shape.ry, x2: shape.cx + shape.rx, y2: shape.cy + shape.ry }
+    case 'line':
+    case 'arrow':
+      return {
+        x1: Math.min(shape.x1, shape.x2),
+        y1: Math.min(shape.y1, shape.y2),
+        x2: Math.max(shape.x1, shape.x2),
+        y2: Math.max(shape.y1, shape.y2),
+      }
+    case 'polyline': {
+      let x1 = Infinity
+      let y1 = Infinity
+      let x2 = -Infinity
+      let y2 = -Infinity
+      for (const [x, y] of shape.points) {
+        x1 = Math.min(x1, x)
+        y1 = Math.min(y1, y)
+        x2 = Math.max(x2, x)
+        y2 = Math.max(y2, y)
+      }
+      return Number.isFinite(x1) ? { x1, y1, x2, y2 } : undefined
+    }
+    case 'text':
+      return { x1: shape.x, y1: shape.y, x2: shape.x, y2: shape.y }
+    case 'path':
+      return undefined
+    default:
+      return undefined
+  }
+}
+
+/**
+ * Rough axis-aligned bounds of one 3D object. Rotation is ignored; the point is
+ * to let the model reason about size and the ground, not to be a collision hull.
+ * @param object - object to measure.
+ * @returns the box in world units.
+ */
+function objectBounds(object: Object3D): Bounds3 {
+  const geometry = object.geometry
+  let half: Vec3
+  switch (object.kind) {
+    case 'box': {
+      const size = geometry.size
+      half = [Math.abs(size?.[0] ?? 1) / 2, Math.abs(size?.[1] ?? 1) / 2, Math.abs(size?.[2] ?? 1) / 2]
+      break
+    }
+    case 'sphere': {
+      const radius = Math.abs(geometry.radius ?? 1)
+      half = [radius, radius, radius]
+      break
+    }
+    case 'cylinder': {
+      const radius = Math.max(
+        Math.abs(geometry.radiusBottom ?? 1),
+        Math.abs(geometry.radiusTop ?? geometry.radiusBottom ?? 1),
+      )
+      half = [radius, Math.abs(geometry.height ?? 1) / 2, radius]
+      break
+    }
+    case 'cone': {
+      const radius = Math.abs(geometry.radiusBottom ?? 1)
+      half = [radius, Math.abs(geometry.height ?? 1) / 2, radius]
+      break
+    }
+    case 'torus': {
+      const radius = Math.abs(geometry.radius ?? 1) + Math.abs(geometry.tube ?? 0.35)
+      half = [radius, Math.abs(geometry.tube ?? 0.35), radius]
+      break
+    }
+    case 'plane': {
+      const size = geometry.size
+      half = [Math.abs(size?.[0] ?? 2) / 2, Math.abs(size?.[1] ?? 2) / 2, 0]
+      break
+    }
+    default:
+      half = [0.5, 0.5, 0.5]
+  }
+  const scale = object.scale
+  const position = object.position
+  const sx = Math.abs(scale[0]) || 0.0001
+  const sy = Math.abs(scale[1]) || 0.0001
+  const sz = Math.abs(scale[2]) || 0.0001
+  return {
+    min: [position[0] - half[0] * sx, position[1] - half[1] * sy, position[2] - half[2] * sz],
+    max: [position[0] + half[0] * sx, position[1] + half[1] * sy, position[2] + half[2] * sz],
+  }
+}
+
+/** Index of the first directional light, or -1. */
+function firstDirectionalIndex(lights: readonly Light3D[]): number {
+  return lights.findIndex(light => light.kind === 'directional')
+}
+
+/**
+ * Whether one light casts, applying the documented default: an explicit
+ * `castShadow` wins; otherwise only the first directional light casts.
+ * @param light - light to inspect.
+ * @param index - its index in the rig.
+ * @param lights - the whole rig.
+ * @returns whether the renderer arms this light for shadows.
+ */
+function castsShadow(light: Light3D, index: number, lights: readonly Light3D[]): boolean {
+  if (typeof light.castShadow === 'boolean') return light.castShadow
+  return light.kind === 'directional' && index === firstDirectionalIndex(lights)
+}
+
+/**
+ * Model-facing warnings for the current board: the things a picture would make
+ * obvious but a bare id list would not.
+ * @param board - current board.
+ * @returns one line per finding, empty when nothing looks off.
+ */
+function diagnose(board: BoardState): string[] {
+  const warnings: string[] = []
+  const outside: string[] = []
+  for (const shape of board.canvas.shapes) {
+    const bounds = shapeBounds(shape)
+    if (bounds === undefined) continue
+    if (bounds.x1 < -0.5 || bounds.y1 < -0.5
+      || bounds.x2 > BOARD_EXTENT + 0.5 || bounds.y2 > BOARD_EXTENT + 0.5) outside.push(shape.id)
+  }
+  if (outside.length > 0) {
+    warnings.push(`${outside.length} 2D shape(s) extend outside the 0..${BOARD_EXTENT} square: `
+      + `${outside.slice(0, 8).join(', ')}${outside.length > 8 ? ', …' : ''}.`)
+  }
+  const scene = board.scene
+  if (scene.objects.length === 0) return warnings
+  const casters = scene.lights
+    .map((light, index) => ({ light, index }))
+    .filter(({ light, index }) => castsShadow(light, index, scene.lights))
+  if (casters.length > 1) {
+    warnings.push(`${casters.length} lights cast shadows (${casters.map(({ index }) => `light #${index + 1}`).join(', ')}); `
+      + 'a single caster gives one readable shadow.')
+  }
+  if (casters.length === 0) warnings.push('No light casts a shadow; 3D objects may look like they float.')
+  const transparentCasters = scene.objects
+    .filter(object => object.castShadow === true && (object.opacity ?? 1) < 0.99)
+    .map(object => object.id)
+  if (transparentCasters.length > 0) {
+    warnings.push(`Transparent object(s) explicitly cast a solid shadow: ${transparentCasters.join(', ')}.`)
+  }
+  const fakeShadows = scene.objects
+    .filter(object => /contact|shadow/i.test(object.id) && (object.opacity ?? 1) >= 0.99)
+    .map(object => object.id)
+  if (fakeShadows.length > 0) {
+    warnings.push(`Opaque object(s) look like hand-made shadows (${fakeShadows.join(', ')}); `
+      + 'they are geometry, not light, and will not follow the light.')
+  }
+  const belowGround = scene.objects.filter(object => objectBounds(object).min[1] < -0.05).map(object => object.id)
+  if (belowGround.length > 0) warnings.push(`Object(s) below the ground plane: ${belowGround.join(', ')}.`)
+  return warnings
+}
+
+/**
+ * Capture a small automatic frame after a mutation, but only when the panel is
+ * on screen. A closed panel must not turn a successful drawing into a timeout.
+ * @param services - capture services, when wired.
+ * @param sessionId - board key.
+ * @param mode - the surface the call just wrote.
+ * @returns the saved PNG path, or undefined.
+ */
+async function autoFrame(
+  services: BoardToolServices | undefined, sessionId: string, mode: '2d' | '3d',
+): Promise<string | undefined> {
+  if (services === undefined || !services.captures.hasViewer(sessionId)) return undefined
+  try {
+    const answer = await services.captures.request(
+      sessionId,
+      { mode, overlay: 'none', debug: 'lit', maxWidth: 768 },
+      1_500,
+    )
+    const saved = await services.frames.save(sessionId, answer.png)
+    return saved.path
+  } catch {
+    // A frame is a convenience after a mutation; never fail the mutation for it.
+    return undefined
+  }
+}
+
+/** Output declaration of one look: the frame, the optional inline image, and the notes. */
+const LOOK_OUTPUT = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    tool: { type: 'string', required: true },
+    frame: {
+      type: 'object',
+      additionalProperties: false,
+      required: true,
+      properties: {
+        path: { type: 'string', required: true },
+        hash: { type: 'string', required: true },
+        bytes: { type: 'integer', required: true },
+        width: { type: 'integer', required: true },
+        height: { type: 'integer', required: true },
+        mode: { type: 'string', enum: ['2d', '3d'], required: true },
+        rev: { type: 'integer', required: true },
+      },
+    },
+    image: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        attachmentId: { type: 'string', required: true },
+        mediaType: { type: 'string', enum: ['image/png'], required: true },
+        bytes: { type: 'integer', required: true },
+        width: { type: 'integer', required: true },
+        height: { type: 'integer', required: true },
+        name: { type: 'string' },
+      },
+    },
+    summary: { type: 'string', required: true },
+    warnings: { type: 'array', items: { type: 'string' }, required: true },
+    details: { type: 'string', required: true },
+  },
+} as const
+
+/** One look result; structurally the canonical output value above. */
+interface LookResult {
+  tool: string
+  frame: {
+    path: string
+    hash: string
+    bytes: number
+    width: number
+    height: number
+    mode: '2d' | '3d'
+    rev: number
+  }
+  image?: AttachedImage
+  summary: string
+  warnings: string[]
+  details: string
+}
+
+/** Render one look as text plus the image itself when an attachment exists. */
+function lookRender(_args: unknown, value: Readonly<LookResult>): ContentBlock[] {
+  const warningText = value.warnings.length === 0 ? '' : `\nWarnings:\n- ${value.warnings.join('\n- ')}`
+  const imageHint = value.image === undefined
+    ? `\nPNG: ${value.frame.path} — open it with read_image.`
+    : ''
+  const blocks: ContentBlock[] = [{
+    type: 'text',
+    text: `${value.summary}${warningText}${imageHint}\n${value.details}`,
+  }]
+  if (value.image !== undefined) blocks.push({ type: 'image', attachment: value.image })
+  return blocks
 }
 
 /** Build one canonical 3D object from a flat `add` op. */
@@ -513,6 +798,14 @@ function buildObject(raw: Record<string, unknown>, index: number, ids: IdAllocat
   if (wireframe !== undefined && typeof wireframe !== 'boolean') {
     throw new Error(`${label}: \`wireframe\` must be true or false`)
   }
+  const castShadow = raw['castShadow']
+  if (castShadow !== undefined && typeof castShadow !== 'boolean') {
+    throw new Error(`${label}: \`castShadow\` must be true or false`)
+  }
+  const receiveShadow = raw['receiveShadow']
+  if (receiveShadow !== undefined && typeof receiveShadow !== 'boolean') {
+    throw new Error(`${label}: \`receiveShadow\` must be true or false`)
+  }
   checkUnitInterval(metalness, 'metalness', label)
   checkUnitInterval(roughness, 'roughness', label)
   checkUnitInterval(opacity, 'opacity', label)
@@ -530,6 +823,8 @@ function buildObject(raw: Record<string, unknown>, index: number, ids: IdAllocat
     emissive: typeof emissive === 'string' ? emissive : null,
     geometry: geometryOf(raw, label),
     ...(spin === undefined ? {} : { spin }),
+    ...(castShadow === undefined ? {} : { castShadow }),
+    ...(receiveShadow === undefined ? {} : { receiveShadow }),
   }
 }
 
@@ -597,13 +892,23 @@ function objectPatch(
     if (typeof wireframe !== 'boolean') throw new Error(`${label}: \`wireframe\` must be true or false`)
     patch.wireframe = wireframe
   }
+  const castShadow = raw['castShadow']
+  if (castShadow !== undefined) {
+    if (typeof castShadow !== 'boolean') throw new Error(`${label}: \`castShadow\` must be true or false`)
+    patch.castShadow = castShadow
+  }
+  const receiveShadow = raw['receiveShadow']
+  if (receiveShadow !== undefined) {
+    if (typeof receiveShadow !== 'boolean') throw new Error(`${label}: \`receiveShadow\` must be true or false`)
+    patch.receiveShadow = receiveShadow
+  }
   const spin = numberField(raw, 'spin', label)
   if (spin !== undefined) patch.spin = spin
   const geometry = geometryOf(raw, label)
   if (Object.keys(geometry).length > 0) patch.geometry = { ...current.geometry, ...geometry }
   if (Object.keys(patch).length === 0) {
     throw new Error(`${label}: nothing to change — pass at least one of position, rotation, scale, color, `
-      + 'metalness, roughness, opacity, wireframe, emissive, spin, size, radius, height, tube, segments')
+      + 'metalness, roughness, opacity, wireframe, castShadow, receiveShadow, emissive, spin, size, radius, height, tube, segments')
   }
   return patch
 }
@@ -653,11 +958,34 @@ function sceneViewOf(raw: unknown): View3DPatch | undefined {
         throw new Error(`view.lights[${index}]: \`intensity\` must not be negative`)
       }
       const position = vec3Field(light, 'position', `view.lights[${index}]`)
+      const castShadow = light['castShadow']
+      if (castShadow !== undefined && typeof castShadow !== 'boolean') {
+        throw new Error(`view.lights[${index}]: \`castShadow\` must be true or false`)
+      }
+      const shadowRaw = light['shadow']
+      let shadow: { radius?: number; mapSize?: number } | undefined
+      if (shadowRaw !== undefined) {
+        if (!isRecord(shadowRaw)) throw new Error(`view.lights[${index}].shadow must be an object`)
+        const radius = numberField(shadowRaw, 'radius', `view.lights[${index}].shadow`)
+        if (radius !== undefined && radius < 0) {
+          throw new Error(`view.lights[${index}].shadow: \`radius\` must not be negative`)
+        }
+        const mapSize = numberField(shadowRaw, 'mapSize', `view.lights[${index}].shadow`)
+        if (mapSize !== undefined && (!Number.isInteger(mapSize) || mapSize < 256 || mapSize > 4096)) {
+          throw new Error(`view.lights[${index}].shadow: \`mapSize\` must be an integer between 256 and 4096`)
+        }
+        shadow = {
+          ...(radius === undefined ? {} : { radius }),
+          ...(mapSize === undefined ? {} : { mapSize }),
+        }
+      }
       const value: Light3D = {
         kind,
         color: typeof color === 'string' ? color : 'white',
         intensity: intensity ?? 1,
         ...(position === undefined ? {} : { position }),
+        ...(castShadow === undefined ? {} : { castShadow }),
+        ...(shadow === undefined || Object.keys(shadow).length === 0 ? {} : { shadow }),
       }
       return value
     })
@@ -671,12 +999,16 @@ function sceneViewOf(raw: unknown): View3DPatch | undefined {
  * @param store - the Host board store the tools mutate.
  * @returns one definition per board tool, in prompt order.
  */
-export function createBoardTools(store: BoardStore, ready: Promise<unknown> = Promise.resolve()): ToolDefinition[] {
+export function createBoardTools(
+  store: BoardStore,
+  ready: Promise<unknown> = Promise.resolve(),
+  services?: BoardToolServices,
+): ToolDefinition[] {
   const draw = defineTool({
     name: DRAW_TOOL,
     description:
-      'Draw a batch of ops on the conversation board (2D); returns the ids it applied. Coordinates, palette and batch '
-      + 'size: see the WHITEBOARD section.',
+      'Draw a batch of ops on the conversation board (2D); returns the ids it applied. Call whiteboard_api for the live '
+      + 'field spec, defaults, palette and batch limit.',
     parameters: {
       ops: {
         type: 'array',
@@ -708,7 +1040,7 @@ export function createBoardTools(store: BoardStore, ready: Promise<unknown> = Pr
               items: { type: 'array', items: { type: 'number' } },
             },
             d: { type: 'string', description: 'SVG path d (path).' },
-            text: { type: 'string', description: 'Label ≤40 chars (text).' },
+            text: { type: 'string', description: 'Text, ≤280 chars (text).' },
             radius: { type: 'number', description: 'Corner radius (rect).' },
             rotation: { type: 'number', description: 'Degrees.' },
             head: { type: 'string', enum: ['end', 'both', 'none'], description: 'Arrow heads.' },
@@ -804,6 +1136,7 @@ export function createBoardTools(store: BoardStore, ready: Promise<unknown> = Pr
         return applyBoardEvent(board, DRAW_EVENT, payload)
       })
       const counts = census(snapshot.board)
+      const frame = await autoFrame(services, sessionId, '2d')
       const result: BatchResult = {
         tool: DRAW_TOOL,
         added,
@@ -811,6 +1144,7 @@ export function createBoardTools(store: BoardStore, ready: Promise<unknown> = Pr
         removed,
         counts,
         summary: changeSummary(DRAW_TOOL, added, updated, removed, counts),
+        ...(frame === undefined ? {} : { frame }),
       }
       return result
     },
@@ -819,8 +1153,8 @@ export function createBoardTools(store: BoardStore, ready: Promise<unknown> = Pr
   const scene = defineTool({
     name: SCENE_TOOL,
     description:
-      'Add or edit objects in the board 3D scene; returns the ids it applied. World space, camera and batch size: see '
-      + 'the WHITEBOARD section.',
+      'Add or edit objects in the board 3D scene; returns the ids it applied. Call whiteboard_api for the live field '
+      + 'spec, camera/lights and batch limit.',
     parameters: {
       ops: {
         type: 'array',
@@ -851,6 +1185,8 @@ export function createBoardTools(store: BoardStore, ready: Promise<unknown> = Pr
             wireframe: { type: 'boolean', description: 'Wireframe.' },
             emissive: { type: 'string', description: 'Glow paint.' },
             spin: { type: 'number', description: 'Deg/sec about Y.' },
+            castShadow: { type: 'boolean', description: 'Cast a shadow (default: opaque, non-wireframe).' },
+            receiveShadow: { type: 'boolean', description: 'Receive shadows (default true).' },
           },
         },
       },
@@ -872,6 +1208,33 @@ export function createBoardTools(store: BoardStore, ready: Promise<unknown> = Pr
           background: { oneOf: [{ type: 'string' }, { type: 'null' }], description: 'Paint; null = theme.' },
           grid: { type: 'boolean', description: 'Ground grid.' },
           autoRotate: { type: 'boolean', description: 'Slow orbit.' },
+          lights: {
+            type: 'array',
+            description: 'Replace every light in the scene; omitted keeps the current rig.',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                kind: { type: 'string', enum: LIGHT_KINDS, required: true, description: 'ambient | directional | point.' },
+                color: { oneOf: [{ type: 'string' }, { type: 'null' }], description: 'Palette token or #rrggbb.' },
+                intensity: { type: 'number', description: 'Non-negative; 0 is legal (shadow-only light).' },
+                position: { type: 'array', items: { type: 'number' }, description: 'World [x,y,z].' },
+                castShadow: {
+                  type: 'boolean',
+                  description: 'Cast a shadow. Omitted: only the first directional light casts.',
+                },
+                shadow: {
+                  type: 'object',
+                  additionalProperties: false,
+                  description: 'Shadow-map tuning when this light casts.',
+                  properties: {
+                    radius: { type: 'number', description: 'Edge softness.' },
+                    mapSize: { type: 'integer', description: '256..4096.' },
+                  },
+                },
+              },
+            },
+          },
         },
       },
     },
@@ -941,6 +1304,7 @@ export function createBoardTools(store: BoardStore, ready: Promise<unknown> = Pr
         return applyBoardEvent(board, SCENE_EVENT, payload)
       })
       const counts = census(snapshot.board)
+      const frame = await autoFrame(services, sessionId, '3d')
       const result: BatchResult = {
         tool: SCENE_TOOL,
         added,
@@ -948,6 +1312,7 @@ export function createBoardTools(store: BoardStore, ready: Promise<unknown> = Pr
         removed,
         counts,
         summary: changeSummary(SCENE_TOOL, added, updated, removed, counts),
+        ...(frame === undefined ? {} : { frame }),
       }
       return result
     },
@@ -956,7 +1321,8 @@ export function createBoardTools(store: BoardStore, ready: Promise<unknown> = Pr
   const read = defineTool({
     name: READ_TOOL,
     description:
-      'Read the board ids, camera and revision before revising work you did not just draw; then reuse those ids.',
+      'Read the whole board state before revising work you did not just draw: every shape/object with its geometry and style, '
+      + 'the view (camera, lights, shadows), the stage viewport and diagnostics. Use whiteboard_look when you need the picture.',
     parameters: {},
     output: {
       schema: { type: 'string' },
@@ -964,19 +1330,146 @@ export function createBoardTools(store: BoardStore, ready: Promise<unknown> = Pr
     },
     execute: async (_args, exec) => {
       await ready
-      const board = store.read(boardIdFor(READ_TOOL, exec)).board
-      const lines = [describeBoard(board)]
-      if (board.scene.objects.length === 0) {
-        const camera = board.scene.camera
-        lines.push(`Camera ${formatVec(camera.position)} -> ${formatVec(camera.target)}, fov ${camera.fov}.`)
+      const sessionId = boardIdFor(READ_TOOL, exec)
+      const snapshot = store.read(sessionId)
+      const board = snapshot.board
+      const viewport = services?.captures.lastViewport(sessionId) ?? null
+      const report = {
+        mode: board.mode,
+        rev: board.rev,
+        canUndo: store.canUndo(sessionId),
+        viewport,
+        canvas: {
+          background: board.canvas.background,
+          grid: board.canvas.grid,
+          shapes: board.canvas.shapes.map(shape => ({ ...shape, bounds: shapeBounds(shape) ?? null })),
+        },
+        scene: {
+          background: board.scene.background,
+          grid: board.scene.grid,
+          autoRotate: board.scene.autoRotate,
+          camera: board.scene.camera,
+          lights: board.scene.lights.map((light, index) => ({
+            ...light,
+            casts: castsShadow(light, index, board.scene.lights),
+          })),
+          objects: board.scene.objects.map(object => ({ ...object, bounds: objectBounds(object) })),
+        },
+        diagnostics: diagnose(board),
       }
-      lines.push(`Canvas is a ${BOARD_EXTENT}×${BOARD_EXTENT} square (origin top-left, y down); 3D is world units with y up.`)
-      if (board.canvas.shapes.length > 0 || board.scene.objects.length > 0) {
-        lines.push('Revise by id with whiteboard_draw / whiteboard_3d instead of redrawing; the ids above are exact.')
-      }
-      return lines.join('\n')
+      return [
+        describeBoard(board),
+        `Canvas is a ${BOARD_EXTENT}×${BOARD_EXTENT} square (origin top-left, y down); 3D is world units with y up. `
+          + 'Bounds are axis-aligned and ignore rotation.',
+        JSON.stringify(report, null, 2),
+        'Use whiteboard_look when you need the picture; use whiteboard_draw / whiteboard_3d to revise by id.',
+      ].join('\n')
     },
   })
 
-  return [draw, scene, read]
+  const look = defineTool({
+    name: LOOK_TOOL,
+    description:
+      'Capture what the open 画板 panel shows, as an image plus measurements and warnings. The panel must be on screen; '
+      + 'without it use whiteboard_read. overlay "ids" labels every element with its id; debug "shadow-only" hides the lit '
+      + 'surfaces and keeps the shadows, which is how a wrong shadow is identified.',
+    parameters: {
+      mode: {
+        type: 'string',
+        enum: ['auto', '2d', '3d'],
+        description: 'Surface to capture; auto follows the panel (default).',
+      },
+      overlay: {
+        type: 'string',
+        enum: ['none', 'ids'],
+        description: 'Draw element ids over the frame (default ids).',
+      },
+      debug: {
+        type: 'string',
+        enum: ['lit', 'shadow-only'],
+        description: 'lit is the real picture; shadow-only shows the shadow pass (3D).',
+      },
+      maxWidth: {
+        type: 'integer',
+        description: 'Longest side of the returned image, in pixels (default 1280).',
+      },
+    },
+    output: { schema: LOOK_OUTPUT, render: lookRender },
+    execute: async (args, exec) => {
+      await ready
+      const sessionId = boardIdFor(LOOK_TOOL, exec)
+      if (services === undefined) {
+        throw new Error(`${LOOK_TOOL}: the capture channel is not wired in this host; use whiteboard_read instead`)
+      }
+      const snapshot = store.read(sessionId)
+      const options: CaptureOptions = {
+        mode: args.mode ?? 'auto',
+        overlay: args.overlay ?? 'ids',
+        debug: args.debug ?? 'lit',
+        maxWidth: args.maxWidth ?? 1_280,
+      }
+      const answer = await services.captures.request(sessionId, options, 4_000)
+      const saved = await services.frames.save(sessionId, answer.png)
+      const image = await services.attachImage(saved, `whiteboard-${saved.hash}.png`)
+      const warnings = diagnose(snapshot.board)
+      const details = JSON.stringify({
+        rev: snapshot.rev,
+        mode: answer.mode,
+        width: answer.width,
+        height: answer.height,
+        camera: answer.camera ?? null,
+        viewport: answer.viewport ?? null,
+      }, null, 2)
+      const summary = `${LOOK_TOOL}: captured the ${answer.mode.toUpperCase()} panel at `
+        + `${answer.width}×${answer.height}px (board rev ${snapshot.rev}); `
+        + (image === undefined ? 'the PNG is on disk.' : 'the image is attached.')
+      const result: LookResult = {
+        tool: LOOK_TOOL,
+        frame: {
+          path: saved.path,
+          hash: saved.hash,
+          bytes: saved.bytes,
+          width: answer.width,
+          height: answer.height,
+          mode: answer.mode,
+          rev: snapshot.rev,
+        },
+        summary,
+        warnings,
+        details,
+        ...(image === undefined ? {} : { image }),
+      }
+      return result
+    },
+  })
+
+  const api = defineTool({
+    name: API_TOOL,
+    description:
+      'Read the live board contract for this conversation: tool list, op/field spec, defaults, palette, '
+      + 'current camera and lights, viewport, limits, examples and hints. Call it before authoring; every '
+      + 'value can change between builds, themes and conversations, so do not assume values from another one.',
+    parameters: {},
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    execute: async (_args, exec) => {
+      await ready
+      const sessionId = boardIdFor(API_TOOL, exec)
+      const snapshot = store.read(sessionId)
+      const theme = services?.captures.lastAppTheme() ?? services?.captures.lastTheme(sessionId)
+      const viewport = services?.captures.lastViewport(sessionId)
+      const manifest = buildManifest({
+        ...(theme === undefined ? {} : { theme }),
+        ...(viewport === undefined ? {} : { viewport }),
+        board: snapshot.board,
+      })
+      // Compact, not pretty: the manifest is already structured JSON and the
+      // pretty form costs roughly twice the context for the same facts.
+      return JSON.stringify(manifest)
+    },
+  })
+
+  return [draw, scene, read, look, api]
 }

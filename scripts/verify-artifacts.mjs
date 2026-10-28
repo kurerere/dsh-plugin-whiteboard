@@ -74,7 +74,7 @@ for (const forbidden of ['three', 'react-dom', 'react']) {
 // ---------------------------------------------------------------------------
 const shared = await readFile(resolve(root, 'src/shared.ts'), 'utf8')
 const routes = [...shared.matchAll(/export const (\w+_PATH)\s*=\s*'([^']+)'/g)].map(m => ({ name: m[1], path: m[2] }))
-if (routes.length !== 4) fail(`expected 4 routes in src/shared.ts, found ${routes.length}`)
+if (routes.length !== 7) fail(`expected 7 routes in src/shared.ts, found ${routes.length}`)
 for (const { name, path } of routes) {
   if (!host.includes(path)) fail(`lib/index.js does not serve ${name} (${path})`)
 }
@@ -93,7 +93,7 @@ for (const retired of RETIRED_ROUTES) {
 }
 
 // The tools belong to the main agent, so their names travel through the Host.
-for (const tool of ['whiteboard_draw', 'whiteboard_3d', 'whiteboard_read']) {
+for (const tool of ['whiteboard_draw', 'whiteboard_3d', 'whiteboard_read', 'whiteboard_look', 'whiteboard_api']) {
   if (!host.includes(tool)) fail(`lib/index.js does not register ${tool}`)
 }
 // Legacy boards are migrated once; the prefix must survive only for that.

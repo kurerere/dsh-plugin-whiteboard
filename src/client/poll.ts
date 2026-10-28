@@ -25,6 +25,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { STATE_PATH, type WhiteboardSnapshot } from '../shared.ts'
 import { applyClear, emptyBoard, isBoardState, type BoardMode, type BoardState } from '../scene.ts'
+import { currentTheme } from './palette.ts'
 
 /** Poll interval while the agent is drawing, in milliseconds. */
 const RUNNING_INTERVAL = 350
@@ -202,7 +203,7 @@ export function useBoard(sessionId: string, running: boolean, active = true): Bo
       controller?.abort()
       const next = new AbortController()
       controller = next
-      const query = new URLSearchParams({ sessionId })
+      const query = new URLSearchParams({ sessionId, theme: currentTheme() })
       globalThis.fetch(`${route(STATE_PATH)}?${query}`, { signal: next.signal, cache: 'no-store' })
         .then(async (response) => {
           if (!response.ok) throw new Error(`HTTP ${response.status}`)

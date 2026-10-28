@@ -72,8 +72,14 @@ Two fixed costs, stated plainly:
 | Tool | Purpose |
 |---|---|
 | `whiteboard_draw` | append 2D ops (`add` / `update` / `remove` / `clear`) |
-| `whiteboard_3d` | append 3D object ops plus an optional view (camera, background, grid, auto-rotate) |
-| `whiteboard_read` | report the current shape / object ids and camera so the model can revise by id |
+| `whiteboard_3d` | append 3D object ops plus an optional view (camera, lights, shadows, background, grid, auto-rotate) |
+| `whiteboard_read` | full state: every shape/object with geometry and materials, the camera, lights, viewport and diagnostics |
+| `whiteboard_look` | capture what the open 画板 panel shows as an image plus measurements/warnings; `overlay: 'ids'` labels elements, `debug: 'shadow-only'` isolates the shadow pass |
+| `whiteboard_api` | the live contract: tool/field spec, defaults, palette, current camera and lights, viewport, limits, examples |
+
+The model sees the board only through `whiteboard_look`: a frame exists only while the 画板 tab is on
+screen. Every mutation also asks for a small frame when the panel is open, and `whiteboard_read` still
+works without it. The GUI itself is token-fenced — a browser is not the board's view.
 
 2D lives in a fixed logical `0..1000` square (origin top-left, y down) letterboxed into the panel; 3D
 is world units, y up, ground at `y = 0`. Seven 2D primitives (rect, ellipse, line, arrow, polyline, SVG

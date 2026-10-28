@@ -29,7 +29,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-tools'
 import type { BoardStore } from './board-store.ts'
-import { createBoardTools } from './tools.ts'
+import { createBoardTools, type BoardToolServices } from './tools.ts'
 
 /**
  * The runtime prompt face we depend on. `dsh-system-prompt` is not a plugin
@@ -47,72 +47,52 @@ interface PromptFace {
 const BOARD_SECTION_ORDER_FALLBACK = 10050
 
 /**
- * The drawing policy of one main agent.
+ * The board bootstrap for one main agent.
  *
- * It is deliberately compact: every main-session request pays for it, drawing or
- * not (about 2.9k characters). The coordinate spaces, palette, liveness rule and
- * id discipline live here exactly once — the tool declarations point at this
- * section instead of repeating it, because duplication costs the same tax twice.
+ * It carries intent and the two hard safety rules only: draw when asked, and
+ * never use a browser as the board's view. The technical contract (coordinate
+ * spaces, palette, defaults, lights, limits, examples) lives in the generated
+ * `whiteboard_api` manifest, so it is inspectable and cannot go stale in a
+ * prompt. That also keeps the resident section small.
  */
 const BOARD_POLICY = [
-  'You also own the WHITEBOARD in the sidebar: a canvas of THIS conversation. The board tools are yours alone.',
+  'WHITEBOARD',
+  'This conversation owns a whiteboard in the sidebar: a 2D canvas and a 3D scene.',
   '',
   'DRAW ONLY WHEN ASKED',
-  'Draw only when the user asks for a drawing — 画/画板/示意图/流程图/时间线/可视化, or "draw", "sketch", "diagram",',
-  '"chart", "show it on the board". An ordinary question is not an ask: never illustrate an answer nobody asked to see,',
-  'and never draw to decorate a reply.',
+  'Draw only when the user asks for a visual. The board tools are yours alone.',
   '',
-  'TWO SURFACES',
-  '- 2D canvas (whiteboard_draw): a fixed 0..1000 square, origin top-left, x right, y DOWN, letterboxed into the panel.',
-  '  Body text at least 14 units, headings 18-28, title up to 36.',
-  '- 3D scene (whiteboard_3d): three.js world units, y UP, ground at y=0, default camera (6.4, 4.6, 8.2) looking at the',
-  '  origin; stand an object on the ground at position [x, height/2, z]. Leave view.background unset so the scene follows',
-  '  the panel theme; set it only for a specific requested backdrop.',
-  'Pick ONE surface as the answer; use the other only when it adds something.',
+  'DISCOVER, DO NOT ASSUME',
+  'Before authoring, call whiteboard_api. It returns the live contract: op/field spec, defaults, palette',
+  'for the current theme, viewport, current camera and lights, limits, examples and hints. Every value can',
+  'change between builds, themes and conversations; do not carry assumptions from another one.',
   '',
-  'DRAW IN SMALL LAYERS',
-  'A tool call only reaches the board when the step ends, so one huge batch appears all at once and looks frozen. Use',
-  '2-6 ops per call, one logical layer at a time (containers and titles, then content, then connectors, then labels),',
-  'with one short line between layers.',
-  'Never let drawing block or replace the task: if the user asks for a drawing mid-task, draw it (still in small',
-  'layers), then continue the task. Do not abandon the task for the board, and do not hold the next task step hostage',
-  'to a perfect board.',
+  'AUTHOR BY ID',
+  'Use whiteboard_draw / whiteboard_3d. Calls append; results name the ids added, updated and removed.',
+  'Revise by id, never repaint. An unknown id rejects the batch and lists the ids that exist.',
   '',
-  'IDS',
-  'Calls append, they never replace. Results name the ids added, updated and removed: keep them and patch by id; never',
-  'redraw a board to change one label. An unknown id rejects the whole batch and lists the ids that exist. Use clear',
-  'only when the user asks to start over.',
+  'VERIFY WITH THE PANEL',
+  'whiteboard_look captures what the open 画板 panel shows: pixels, measurements and warnings (ids can be',
+  'overlaid and shadows isolated). It only works while the panel is open. Never open the GUI in a browser:',
+  'it is token-fenced and is not your view. whiteboard_read returns the full state without the picture.',
   '',
-  'LOOK',
-  'Compose on a grid: aligned edges, consistent gaps, margins. Label every meaningful shape in 2-5 words. Use the',
-  'palette tokens (ink, muted, blue, cyan, teal, green, lime, yellow, amber, orange, red, pink, purple, indigo, white,',
-  'black) rather than hex, so light and dark both work; tint containers at 0.12-0.2 opacity with a solid stroke; aim',
-  'for dozens of shapes (caps: 300 shapes, 120 objects) and 3-4 colors plus ink and muted.',
-  '',
-  'CONTINUITY AND UNDO',
-  'The board is durable across turns and restarts: read it before revising old work, and keep the same ids between',
-  'turns. The user can step one batch back from the board bar (Ctrl+Z), so after 撤销 the board may be one revision',
-  'older than you remember — call whiteboard_read before redrawing. You cannot undo yourself; clear plus a redraw is',
-  'your only destructive move.',
-  '',
-  'EXAMPLE (flow, layer 1 of 2)',
-  '{"ops":[{"op":"add","kind":"rect","id":"a","x":70,"y":150,"w":210,"h":95,"radius":16,"fill":"blue","opacity":0.14,',
-  '"stroke":"blue","strokeWidth":3},{"op":"add","kind":"text","x":175,"y":200,"text":"Collect","size":22,"weight":"bold",',
-  '"align":"center","baseline":"middle","fill":"ink"}]}',
+  'CLEAR AND UNDO',
+  'Clearing and undoing belong to the user unless they ask. Read after external changes.',
   '',
   'After drawing, say in one or two sentences what the user is looking at and what you can change next.',
 ].join('\n')
 
 /**
- * Wire one agent's board face: the three tools plus the drawing policy section.
+ * Wire one agent's board face: the five tools plus the board bootstrap section.
  * @param agent - the agent being announced or found live at activation.
  * @param store - the Host board store the tools mutate.
  * @param ready - resolves once the one-time legacy board migration has settled.
+ * @param services - capture/frame services shared by every agent's board tools.
  * @returns whether the agent was wired (false for subagents).
  */
-function wireAgent(agent: Agent, store: BoardStore, ready: Promise<unknown>): boolean {
+function wireAgent(agent: Agent, store: BoardStore, ready: Promise<unknown>, services: BoardToolServices): boolean {
   if (agent.session.header.origin === 'subagent') return false
-  for (const definition of createBoardTools(store, ready)) agent.ctx.tools.register(definition)
+  for (const definition of createBoardTools(store, ready, services)) agent.ctx.tools.register(definition)
   const prompt = agent.ctx.get('systemPrompt') as PromptFace | undefined
   if (prompt !== undefined) {
     let order = BOARD_SECTION_ORDER_FALLBACK
@@ -133,11 +113,14 @@ function wireAgent(agent: Agent, store: BoardStore, ready: Promise<unknown>): bo
  * @param ctx - Host plugin context.
  * @param store - the Host board store.
  * @param ready - resolves once the one-time legacy board migration has settled.
+ * @param services - capture/frame services shared by every agent's board tools.
  */
-export function registerBoardFace(ctx: Context, store: BoardStore, ready: Promise<unknown>): void {
+export function registerBoardFace(
+  ctx: Context, store: BoardStore, ready: Promise<unknown>, services: BoardToolServices,
+): void {
   ctx.on('agent/created', ({ agent }) => {
     try {
-      if (wireAgent(agent, store, ready)) {
+      if (wireAgent(agent, store, ready, services)) {
         ctx.logger.debug(`whiteboard: board tools and policy registered for ${agent.id}`)
       }
     } catch (error) {
@@ -147,7 +130,7 @@ export function registerBoardFace(ctx: Context, store: BoardStore, ready: Promis
   })
   for (const agent of ctx.agents.list()) {
     try {
-      wireAgent(agent, store, ready)
+      wireAgent(agent, store, ready, services)
     } catch (error) {
       ctx.logger.warn(`whiteboard: could not register the board face for the live agent ${agent.id}: ${String(error)}`)
     }

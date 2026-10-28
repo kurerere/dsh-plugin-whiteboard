@@ -26,7 +26,7 @@
  * Every route is an exact Connection Fetch route, so it inherits the Connection's
  * trust and authentication fence (owner Peers only).
  */
-import type { BoardState } from './scene.ts';
+import type { BoardMode, BoardState, Camera3D } from './scene.ts';
 /** `GET ?sessionId=<id>` → {@link WhiteboardSnapshot}: the whole current board. */
 export declare const STATE_PATH = "/api/whiteboard.state";
 /** `POST { sessionId, mode }` → {@link WhiteboardCleared}: clear a board surface. */
@@ -52,8 +52,83 @@ export declare const DRAW_TOOL = "whiteboard_draw";
 export declare const SCENE_TOOL = "whiteboard_3d";
 /** Model-facing tool that reports the current board without changing it. */
 export declare const READ_TOOL = "whiteboard_read";
-/** Tool names owned by this plugin (all three belong to the main agent). */
+/** Model-facing tool that captures what the open panel currently shows. */
+export declare const LOOK_TOOL = "whiteboard_look";
+/** Model-facing tool that returns the live, self-describing board contract. */
+export declare const API_TOOL = "whiteboard_api";
+/** Tool names owned by this plugin (all five belong to the main agent). */
 export declare const BOARD_TOOLS: readonly string[];
+/**
+ * `GET ?sessionId=<id>` → {@link CapturePollAnswer} or 204: the open panel asks
+ * whether the model wants a frame. The panel long-polls this while it is on
+ * screen; a closed panel simply never asks, and a capture request then times out
+ * with a readable error instead of rendering somewhere the user cannot see.
+ */
+export declare const CAPTURE_POLL_PATH = "/api/whiteboard.capture";
+/** `POST CaptureAnswer` → {@link CaptureAccepted}: the panel returns the frame. */
+export declare const CAPTURE_SUBMIT_PATH = "/api/whiteboard.capture.frame";
+/**
+ * `POST { theme }` → `{ accepted: true }`: the client plugin reports the app
+ * palette once and on every flip, so `whiteboard_api` knows the theme even
+ * before the 画板 tab has been opened.
+ */
+export declare const THEME_PATH = "/api/whiteboard.theme";
+/** One frame request the model's `whiteboard_look` is waiting for. */
+export interface CaptureRequest {
+    /** Correlates the answer; opaque to the model. */
+    id: string;
+    /** Board the frame belongs to (the main Session id). */
+    sessionId: string;
+    /** Content revision the frame should show. */
+    rev: number;
+    /** Surface the board document currently points at. */
+    mode: BoardMode;
+    /** What the model asked for; the panel may narrow it (it captures what is on screen). */
+    options: CaptureOptions;
+}
+/** What one `whiteboard_look` call asks the panel for. */
+export interface CaptureOptions {
+    /** Requested surface; `auto` (the default) captures whatever the panel displays. */
+    mode?: BoardMode | 'auto';
+    /** Draw element ids over the frame so pixels and ids can be matched. */
+    overlay?: 'none' | 'ids';
+    /** `lit` is the real picture; `shadow-only` hides lit surfaces and keeps shadows. */
+    debug?: 'lit' | 'shadow-only';
+    /** Downscale the frame so its longest side is at most this many pixels. */
+    maxWidth?: number;
+}
+/** Stage size the panel reported with a frame, in CSS pixels. */
+export interface CaptureViewport {
+    width: number;
+    height: number;
+    dpr: number;
+}
+/** One captured frame as the panel submits it. */
+export interface CaptureAnswer {
+    /** {@link CaptureRequest.id} this answers. */
+    requestId: string;
+    /** Base64 PNG, with or without a `data:image/png;base64,` prefix. */
+    png: string;
+    width: number;
+    height: number;
+    /** The surface that was actually captured. */
+    mode: BoardMode;
+    /** Live camera at capture time (3D only). */
+    camera?: Camera3D;
+    /** Stage size in CSS pixels (both surfaces). */
+    viewport?: CaptureViewport;
+    /** A failure the panel could explain; the Host turns it into the tool error. */
+    error?: string;
+}
+/** Response body of {@link CAPTURE_POLL_PATH} when a request is waiting. */
+export interface CapturePollAnswer {
+    request: CaptureRequest;
+}
+/** Response body of {@link CAPTURE_SUBMIT_PATH}. */
+export interface CaptureAccepted {
+    accepted: boolean;
+    error?: string;
+}
 /**
  * Whether a Session id is one of the retired whiteboard child Sessions.
  * @param sessionId - candidate Session id.

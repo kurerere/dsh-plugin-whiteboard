@@ -292,3 +292,47 @@ Two conclusions:
 The 3D stage and its export take the panel surface (`--dsw-alias-bg-layer-1`, `#fff` in light), verified by
 decoding the exported PNG, so the v1 "bright rectangle in a dark UI" class stays fixed in both
 directions.
+
+### v3 — the model gets eyes, and the preset becomes a contract
+
+The first 3D drawing exposed the real gap: the board could describe its ids but not its picture. A user
+said 「影子不对」 and the model's only way to look was to drive a browser at the GUI — which is token-fenced
+and answered 401. The redesign closes that loop instead of adding more prose.
+
+**Capture is tab-only, by decision.** There is no headless renderer: a frame exists only while the 画板
+panel is on screen, because that is the picture the user can check and the camera is the one they actually
+see. The panel polls `GET /api/whiteboard.capture?sessionId=` (250 ms, only while visible), captures the
+displayed surface, and answers `POST /api/whiteboard.capture.frame`. The Host broker (`src/capture.ts`)
+correlates the answer with the waiting tool call, times out with a readable error, and persists the PNG
+under `<dsh home>/storages/whiteboard/frames/<session>/<hash>.png`. When the deployment mounts the
+attachment service, the same bytes become an `image` content block; the path remains the `read_image`
+fallback.
+
+**`whiteboard_look` is the verification tool.** It returns the frame (inline image plus a text digest),
+element-id labels optional, and `debug: 'shadow-only'` for the 3D shadow pass. `whiteboard_read` now
+returns the whole state — geometry, materials, lights, camera, bounds and diagnostics — instead of an id
+list. Mutations ask the panel for a small frame when it is on screen and report its path; a closed panel
+never turns a successful drawing into a timeout.
+
+**The preset became a manifest.** `src/spec.ts` declares the fields, kinds, view, lights, limits and
+examples once; `src/manifest.ts` turns it into the `whiteboard_api` payload (build, theme, viewport, live
+camera/lights, defaults, palette, design scales, examples). The prompt section shrank to intent and two
+safety rules: draw when asked, and never use a browser as the board's view. The technical numbers are
+queryable and overridable, so they cannot go stale in a prompt.
+
+**The shadow bug is fixed at the source, not by another preset.** Lights may now set `castShadow` and
+shadow-map tuning; an omitted flag means only the first directional casts. Objects default to casting only
+when opaque and non-wireframe, so a glass shell cannot throw a solid shadow. The default rig keeps the
+shadow on a dedicated zero-intensity directional, the ShadowMaterial floor went from 0.10 to 0.22, and
+`look({debug: 'shadow-only'})` makes a double shadow visible instead of a guess. The model can now set the
+same fields (`view.lights`, object `castShadow`/`receiveShadow`) and verify the result.
+
+Verification so far: `pnpm run check` green — typecheck, both bundles, declaration emit, artifact/wire
+contract (7 routes, 5 tools), 39 Host tests (3 Windows-only store tests skipped). The capture round trip
+was run live on an isolated dev Host (port 57091, throwaway `DSH_HOME`): the model called `whiteboard_api`,
+drew a three-layer 3D bulb, called `whiteboard_look` for the lit frame and again for the shadow-only frame,
+and reported that the glass shade cast no solid shadow and that the shadow fell right/back from the
+zero-intensity shadow light. A second conversation confirmed the manifest reports `theme: "dark"` and
+`castShadow.accepted: true`. The remaining harness gap is portability: `scripts/dev.mjs` and `scripts/e2e.mjs`
+still drive `cmd.exe`, so the macOS run used a manually created dev home and the browser MCP; a cross-platform
+e2e script is the next piece of work.

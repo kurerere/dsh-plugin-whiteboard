@@ -26,14 +26,15 @@ import {
 import type { InjectFace, PropsLocale, PropsRuntime, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
-import type { WhiteboardUndone } from '../shared.ts'
+import type { CaptureOptions, WhiteboardUndone } from '../shared.ts'
 import type { BoardMode } from '../scene.ts'
 import { surfaceCount } from './board.ts'
+import { capture2d, useCapture, type CaptureFrame } from './capture.ts'
 import type { DraftFace } from './model.ts'
 import { surfacePaint } from './palette.ts'
 import { useBoard } from './poll.ts'
 import { Board2D } from './render2d.tsx'
-import { Board3D } from './render3d.tsx'
+import { Board3D, type Board3DCapture } from './render3d.tsx'
 import type { NS } from './locales.ts'
 
 /** Keys of the empty board's example prompts. */
@@ -286,6 +287,45 @@ function WhiteboardBoard({ sessionId, running, visible, standalone, clear, undo,
     measureStage(node)
   }, [measureStage])
 
+  /** The stage has been measured; after this its canvas or WebGL engine exists. */
+  const stageReady = size.width > 0 && size.height > 0
+
+  /**
+   * Latest board and surface, read by the capture hook at capture time. Keeping
+   * them in refs is what lets that hook's polling effect stay armed across draws:
+   * re-arming it on every revision would churn `AbortController`s and could drop
+   * a request that arrived mid-draw.
+   */
+  const latestBoard = useRef(board)
+  latestBoard.current = board
+  const latestSurface = useRef<BoardMode>(surface)
+  latestSurface.current = surface
+  /** The 3D stage's capture handle; filled by `Board3D` once its engine is up. */
+  const capture3d = useRef<Board3DCapture | undefined>(undefined)
+
+  /**
+   * Take the frame the model asked for.
+   *
+   * A request may name a surface, but a frame can only be taken of what is on
+   * screen — that is the product decision behind this feature — so the displayed
+   * surface wins and the answer reports it. Overlay, debug state and output size
+   * are delegated to whichever renderer owns the pixels.
+   */
+  const snapshot = useCallback((options: CaptureOptions): CaptureFrame => {
+    if (latestSurface.current === '3d') {
+      const stage = capture3d.current
+      if (stage === undefined) throw new Error('the 3D stage is not ready')
+      return { ...stage.capture(options), mode: '3d' }
+    }
+    const stage = stageNode.current
+    if (stage === null) throw new Error('the board stage is not mounted')
+    return capture2d(stage, latestBoard.current, options)
+  }, [])
+
+  // Polls only while this tab is on screen and the stage is measurable, so an
+  // idle board costs one 204 per tick and never renders a frame nobody sees.
+  useCapture({ sessionId, surface, visible, ready: stageReady, revision: rev, snapshot })
+
   // Follow the surface the model just drew on, unless the user pinned one.
   useEffect(() => {
     if (pinned) return
@@ -405,7 +445,6 @@ function WhiteboardBoard({ sessionId, running, visible, standalone, clear, undo,
   const other: BoardMode = surface === '2d' ? '3d' : '2d'
   const modeControl = `dshwb-mode-${sessionId}`
   const pageSize = Math.max(0, Math.min(size.width, size.height) - PAGE_INSET * 2)
-  const stageReady = size.width > 0 && size.height > 0
   const empty = count === 0
 
   // An empty board explains where the request goes, so the copy follows the input:
@@ -511,6 +550,7 @@ function WhiteboardBoard({ sessionId, running, visible, standalone, clear, undo,
               scene={board.scene}
               resetKey={resetKey}
               hint={hint}
+              captureRef={capture3d}
               fallback={<p className="dshwb-stageNotice">{t('webgl.unavailable')}</p>}
             />
           )}

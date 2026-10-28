@@ -22,13 +22,14 @@ import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type {} from '@deepseek-ai/dsh-client-connection/client'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { SAY_PATH, type WhiteboardSaid } from '../shared.ts'
+import { SAY_PATH, THEME_PATH, type WhiteboardSaid } from '../shared.ts'
 import type { BoardMode } from '../scene.ts'
 import { GuideArtworkWhiteboard } from './artwork.tsx'
 import { en, NS, zh, type WhiteboardKey } from './locales.ts'
 import { WhiteboardModel } from './model.ts'
 import { wakeBoard } from './poll.ts'
 import { WhiteboardTab, type WhiteboardTabInjected } from './mounts.tsx'
+import { currentTheme, subscribeTheme } from './palette.ts'
 import { createBoardReveal, type RevealSidebarFace } from './reveal.ts'
 import STYLES from './styles.css'
 
@@ -119,6 +120,30 @@ export function apply(ctx: ClientContext): void {
     document.head.appendChild(tag)
     return () => { tag.remove() }
   }, 'whiteboard: stylesheet')
+
+  // The API manifest reports the palette the user is actually looking at. That
+  // must be known before the 画板 tab is opened (the model may call
+  // whiteboard_api on a conversation that has never shown the board), so the
+  // client reports the app theme at activation and on every flip.
+  ctx.effect(() => {
+    let last: 'light' | 'dark' | undefined
+    const report = (): void => {
+      const theme = currentTheme()
+      if (theme === last) return
+      last = theme
+      void globalThis.fetch(route(THEME_PATH), {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ theme }),
+      }).catch(() => {
+        // An older Host may not serve the route; the per-board poll remains the fallback.
+      })
+    }
+    const stop = subscribeTheme(report)
+    report()
+    return stop
+  }, 'whiteboard: report the app theme')
 
   const model = new WhiteboardModel()
   // Host and Client faces type-check in one program, so `ctx.sessions` resolves to

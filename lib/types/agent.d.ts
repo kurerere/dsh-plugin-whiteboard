@@ -27,13 +27,15 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import type { BoardStore } from './board-store.ts';
+import { type BoardToolServices } from './tools.ts';
 /**
  * Register the board face for every main agent of this plugin's lifetime, and for
  * the live ones that already exist.
  * @param ctx - Host plugin context.
  * @param store - the Host board store.
  * @param ready - resolves once the one-time legacy board migration has settled.
+ * @param services - capture/frame services shared by every agent's board tools.
  */
-export declare function registerBoardFace(ctx: Context, store: BoardStore, ready: Promise<unknown>): void;
+export declare function registerBoardFace(ctx: Context, store: BoardStore, ready: Promise<unknown>, services: BoardToolServices): void;
 /** The policy text, exported for tests that assert its size and hard rules. */
 export declare const BOARD_POLICY_TEXT: string;

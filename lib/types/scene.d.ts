@@ -207,9 +207,23 @@ export interface Object3D {
     geometry: Geometry3D;
     /** Rotate about the world Y axis on its own, in degrees per second. */
     spin?: number;
+    /**
+     * Cast a shadow. Omitted means "decide from the material": opaque,
+     * non-wireframe objects cast; transparent objects do not.
+     */
+    castShadow?: boolean;
+    /** Receive shadows; omitted means true. */
+    receiveShadow?: boolean;
 }
 /** 3D light kinds. */
 export type LightKind = 'ambient' | 'directional' | 'point';
+/** Shadow-map tuning for one casting light. */
+export interface LightShadow3D {
+    /** Softness of the shadow edge (three.js `shadow.radius`). */
+    radius?: number;
+    /** Square shadow-map resolution. */
+    mapSize?: number;
+}
 /** One 3D light. */
 export interface Light3D {
     kind: LightKind;
@@ -217,6 +231,13 @@ export interface Light3D {
     intensity: number;
     /** Position (directional/point only). */
     position?: Vec3;
+    /**
+     * Cast a shadow. Omitted means "the first directional light casts"; the
+     * default rig therefore has one visible shadow instead of one per light.
+     */
+    castShadow?: boolean;
+    /** Shadow-map tuning when this light casts. */
+    shadow?: LightShadow3D;
 }
 /** Camera framing of the 3D scene. */
 export interface Camera3D {
@@ -295,7 +316,12 @@ export interface ClearEvent {
 }
 /** Default camera: a three-quarter view of the origin. */
 export declare const DEFAULT_CAMERA: Camera3D;
-/** Default light rig: soft ambient plus two opposing directionals. */
+/**
+ * Default light rig: one lit key, one unshadowed fill, and one shadow-only
+ * directional (zero intensity) placed so its shadow is visible from the default
+ * camera. Keeping the shadow on its own light means the fill cannot throw a
+ * second, contradictory shadow — the defect the first 3D drawing exposed.
+ */
 export declare const DEFAULT_LIGHTS: Light3D[];
 /** An empty board document. */
 export declare function emptyBoard(): BoardState;

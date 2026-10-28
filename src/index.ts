@@ -26,11 +26,15 @@ import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-tools'
 import { registerBoardFace } from './agent.ts'
 import { createBoardStore, type ClearMode } from './board-store.ts'
+import { createCaptureService, createFrameStore, createImageAttacher } from './capture.ts'
 import { migrateLegacyBoards } from './migrate.ts'
 import {
-  CLEAR_PATH, isLegacyWhiteboardId, SAY_PATH, STATE_PATH, UNDO_PATH,
+  CAPTURE_POLL_PATH, CAPTURE_SUBMIT_PATH, CLEAR_PATH, isLegacyWhiteboardId, SAY_PATH, STATE_PATH, THEME_PATH, UNDO_PATH,
+  type CaptureAccepted, type CaptureAnswer, type CapturePollAnswer, type CaptureViewport,
   type WhiteboardCleared, type WhiteboardSaid, type WhiteboardSnapshot, type WhiteboardUndone,
 } from './shared.ts'
+import type { Camera3D, Vec3 } from './scene.ts'
+import type { BoardToolServices } from './tools.ts'
 
 export type * from './shared.ts'
 export type { BoardState } from './scene.ts'
@@ -85,6 +89,42 @@ function validSessionId(value: unknown): value is string {
   return typeof value === 'string' && SESSION_ID.test(value) && !isLegacyWhiteboardId(value)
 }
 
+/** Read one optional `[x, y, z]` vector from an untrusted frame upload. */
+function asVec3(value: unknown): Vec3 | undefined {
+  if (!Array.isArray(value) || value.length !== 3) return undefined
+  const [x, y, z] = value
+  if (typeof x !== 'number' || !Number.isFinite(x)
+    || typeof y !== 'number' || !Number.isFinite(y)
+    || typeof z !== 'number' || !Number.isFinite(z)) return undefined
+  return [x, y, z]
+}
+
+/** Read one optional camera from an untrusted frame upload. */
+function asCamera(value: unknown): Camera3D | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const record = value as Record<string, unknown>
+  const position = asVec3(record['position'])
+  const target = asVec3(record['target'])
+  const fov = record['fov']
+  if (position === undefined || target === undefined || typeof fov !== 'number' || !Number.isFinite(fov)) {
+    return undefined
+  }
+  return { position, target, fov }
+}
+
+/** Read one optional stage viewport from an untrusted frame upload. */
+function asViewport(value: unknown): CaptureViewport | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const record = value as Record<string, unknown>
+  const width = record['width']
+  const height = record['height']
+  const dpr = record['dpr']
+  if (typeof width !== 'number' || !Number.isFinite(width) || width <= 0) return undefined
+  if (typeof height !== 'number' || !Number.isFinite(height) || height <= 0) return undefined
+  if (typeof dpr !== 'number' || !Number.isFinite(dpr) || dpr <= 0) return undefined
+  return { width, height, dpr }
+}
+
 /** The controller service name, kept in one place so the probe can fake it. */
 const SESSION_CONTROLLER = 'sessionController'
 
@@ -101,12 +141,19 @@ export function apply(ctx: Context): void {
     ctx.logger.warn(`whiteboard: legacy board migration failed: ${String(error)}`)
     return undefined
   })
+  const captures = createCaptureService(store)
+  const services: BoardToolServices = {
+    captures,
+    frames: createFrameStore(),
+    attachImage: createImageAttacher(ctx),
+  }
 
   ctx.effect(() => () => {
+    captures.dispose()
     store.dispose()
   }, 'whiteboard: lifetime')
 
-  registerBoardFace(ctx, store, ready)
+  registerBoardFace(ctx, store, ready, services)
 
   const controller = (): SessionControllerFace | undefined => {
     const services = ctx as unknown as { get(name: string): unknown }
@@ -141,10 +188,15 @@ export function apply(ctx: Context): void {
     methods: ['GET'],
     requestBody: 'buffered',
     fetch: (request) => {
-      const sessionId = new URL(request.url).searchParams.get('sessionId')
+      const url = new URL(request.url)
+      const sessionId = url.searchParams.get('sessionId')
       if (!validSessionId(sessionId)) return Promise.resolve(fail(400, 'invalid sessionId'))
+      const theme = url.searchParams.get('theme')
       return ready.then(() => {
         try {
+          // The panel's ordinary state poll is also the cheapest place to learn
+          // which palette it is painting in; the API manifest reports it.
+          if (theme === 'light' || theme === 'dark') captures.noteTheme(sessionId, theme)
           // Memory-only after the first touch, so polling stays cheap. A Session
           // with no board document reads as an empty board; no file is created
           // until the first mutation.
@@ -158,6 +210,83 @@ export function apply(ctx: Context): void {
           return failure(error)
         }
       })
+    },
+  })
+
+  ctx.connection.fetch.register({
+    path: CAPTURE_POLL_PATH,
+    methods: ['GET'],
+    requestBody: 'buffered',
+    fetch: (request) => {
+      const sessionId = new URL(request.url).searchParams.get('sessionId')
+      if (!validSessionId(sessionId)) return Promise.resolve(fail(400, 'invalid sessionId'))
+      return ready.then(() => {
+        try {
+          // Taking a request is also the panel's heartbeat: `hasViewer` is what
+          // lets a mutation decide whether an automatic frame is worth waiting for.
+          const pending = captures.take(sessionId)
+          return pending === undefined
+            ? new Response(null, { status: 204, headers: NO_STORE })
+            : json({ request: pending } satisfies CapturePollAnswer)
+        } catch (error) {
+          return failure(error)
+        }
+      })
+    },
+  })
+
+  ctx.connection.fetch.register({
+    path: CAPTURE_SUBMIT_PATH,
+    methods: ['POST'],
+    requestBody: 'buffered',
+    fetch: async (request) => {
+      const body = await readBody(request)
+      if (body === undefined) return fail(400, 'invalid JSON body')
+      const requestId = body['requestId']
+      const png = body['png']
+      const width = body['width']
+      const height = body['height']
+      const mode = body['mode']
+      const failureText = body['error']
+      if (typeof requestId !== 'string' || requestId === '') return fail(400, 'invalid requestId')
+      if (typeof png !== 'string' || png.length > 8_000_000) return fail(400, 'invalid png')
+      if (typeof width !== 'number' || !Number.isFinite(width) || width < 0) return fail(400, 'invalid width')
+      if (typeof height !== 'number' || !Number.isFinite(height) || height < 0) return fail(400, 'invalid height')
+      if (mode !== '2d' && mode !== '3d') return fail(400, 'mode must be "2d" or "3d"')
+      const camera = body['camera'] === undefined ? undefined : asCamera(body['camera'])
+      const viewport = body['viewport'] === undefined ? undefined : asViewport(body['viewport'])
+      const answer: CaptureAnswer = {
+        requestId,
+        png,
+        width,
+        height,
+        mode,
+        ...(camera === undefined ? {} : { camera }),
+        ...(viewport === undefined ? {} : { viewport }),
+        ...(typeof failureText === 'string' && failureText !== '' ? { error: failureText } : {}),
+      }
+      try {
+        const result = captures.submit(answer)
+        return json(result satisfies CaptureAccepted, result.accepted ? 200 : 410)
+      } catch (error) {
+        return failure(error)
+      }
+    },
+  })
+
+  ctx.connection.fetch.register({
+    path: THEME_PATH,
+    methods: ['POST'],
+    requestBody: 'buffered',
+    fetch: async (request) => {
+      const body = await readBody(request)
+      if (body === undefined) return fail(400, 'invalid JSON body')
+      const theme = body['theme']
+      if (theme !== 'light' && theme !== 'dark') return fail(400, 'theme must be "light" or "dark"')
+      // App-wide, not per board: it is what whiteboard_api reports before any
+      // 画板 tab has existed, so a palette decision is not made against a guess.
+      captures.noteAppTheme(theme)
+      return json({ accepted: true })
     },
   })
 

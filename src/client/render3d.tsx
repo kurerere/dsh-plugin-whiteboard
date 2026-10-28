@@ -14,7 +14,7 @@
  * adds a group of objects reads as one motion.
  */
 
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type MutableRefObject, type ReactNode } from 'react'
 import {
   ACESFilmicToneMapping, AmbientLight, BoxGeometry, Color, ConeGeometry, CylinderGeometry, DataTexture,
   DirectionalLight, DoubleSide, EquirectangularReflectionMapping, FrontSide, GridHelper, Group, Mesh,
@@ -23,10 +23,16 @@ import {
   WebGLRenderer, type BufferGeometry, type Object3D as ThreeObject, type WebGLRenderTarget,
 } from 'three'
 import { type Camera3D, type Object3D, type Scene3D } from '../scene.ts'
-import { currentTheme, resolvePaint, subscribeTheme, type ThemeMode } from './palette.ts'
+import type { CaptureOptions, CaptureViewport } from '../shared.ts'
+import { captureSize, captureWidthLimit, encodePng } from './capture.ts'
+import { drawIdLabel } from './overlay.ts'
+import { currentTheme, resolvePaint, subscribeTheme, surfacePaint, type ThemeMode } from './palette.ts'
 
 /** Appear animation length of one new object, in milliseconds. */
 const APPEAR_MS = 420
+
+/** Default longest side of a captured 3D frame, in pixels. */
+const DEFAULT_CAPTURE_WIDTH = 1280
 
 /** Ground grid and floor size, in world units. */
 const GROUND_EXTENT = 24
@@ -35,6 +41,35 @@ const GROUND_DIVISIONS = 24
 /** Vertical orbit clamp, in radians. */
 const PHI_MIN = 0.12
 const PHI_MAX = Math.PI - 0.12
+
+/** One frame the 3D stage hands to the tab, in the answer route's shape. */
+export interface Board3DFrame {
+  /** Bare base64 PNG (no `data:image/png;base64,` prefix). */
+  readonly png: string
+  /** Frame width in output pixels. */
+  readonly width: number
+  /** Frame height in output pixels. */
+  readonly height: number
+  /** Live camera at capture time. */
+  readonly camera: Camera3D
+  /** Stage size in CSS pixels. */
+  readonly viewport: CaptureViewport
+}
+
+/**
+ * The 3D stage's capture handle.
+ *
+ * The tab keeps one in a ref (see {@link Board3DProps.captureRef}) so the capture
+ * hook can take a frame without importing three.js or reaching into the engine.
+ */
+export interface Board3DCapture {
+  /**
+   * Take one frame of the view currently on screen.
+   * @param options - requested overlay/debug state and output size.
+   * @returns the PNG plus the camera and viewport that produced it.
+   */
+  capture(options: CaptureOptions): Board3DFrame
+}
 
 /** Props of the 3D surface. */
 export interface Board3DProps {
@@ -46,6 +81,12 @@ export interface Board3DProps {
   hint?: ReactNode
   /** Rendered instead of the scene when this environment has no WebGL. */
   fallback?: ReactNode
+  /**
+   * Filled with the live stage's capture handle once the engine exists, and
+   * cleared when the stage unmounts, so a caller can take a frame of what the
+   * user sees without holding the renderer.
+   */
+  captureRef?: MutableRefObject<Board3DCapture | undefined>
 }
 
 interface Entry {
@@ -69,6 +110,8 @@ interface Engine {
   update(scene: Scene3D): void
   resize(): void
   resetCamera(camera: Camera3D): void
+  /** Take one frame of the current view, with the requested overlays and debug state. */
+  capture(options: CaptureOptions): Board3DFrame
   dispose(): void
 }
 
@@ -188,12 +231,14 @@ function restyle(material: MeshStandardMaterial, object: Object3D): void {
 }
 
 /**
- * Configure one directional light as the scene's shadow caster.
+ * Configure one directional light as a shadow caster.
  * @param light - the light to arm.
+ * @param shadow - optional map-size and softness overrides from the document.
  */
-function armShadow(light: DirectionalLight): void {
+function armShadow(light: DirectionalLight, shadow?: { radius?: number; mapSize?: number }): void {
   light.castShadow = true
-  light.shadow.mapSize.set(2048, 2048)
+  const mapSize = Math.max(256, Math.round(shadow?.mapSize ?? 2048))
+  light.shadow.mapSize.set(mapSize, mapSize)
   light.shadow.camera.near = 0.5
   light.shadow.camera.far = 60
   light.shadow.camera.left = -11
@@ -202,7 +247,7 @@ function armShadow(light: DirectionalLight): void {
   light.shadow.camera.bottom = -11
   light.shadow.bias = -0.0004
   light.shadow.normalBias = 0.03
-  light.shadow.radius = 2.5
+  light.shadow.radius = Math.max(0, shadow?.radius ?? 2.5)
   light.shadow.camera.updateProjectionMatrix()
 }
 
@@ -309,7 +354,7 @@ function createEngine(host: HTMLDivElement): Engine | undefined {
   const ground = new Group()
   // A shadow-only catcher: opaque objects ground themselves on it without the
   // board having to paint a floor the model never asked for.
-  const floorMaterial = new ShadowMaterial({ color: 0x000000, opacity: 0.1, transparent: true })
+  const floorMaterial = new ShadowMaterial({ color: 0x000000, opacity: 0.22, transparent: true })
   const floor = new Mesh(new PlaneGeometry(GROUND_EXTENT * 1.8, GROUND_EXTENT * 1.8), floorMaterial)
   floor.rotation.x = -Math.PI / 2
   floor.position.y = -0.004
@@ -379,6 +424,7 @@ function createEngine(host: HTMLDivElement): Engine | undefined {
   function syncLights(state: Scene3D): void {
     for (const light of lights) scene.remove(light)
     lights.length = 0
+    let directionalSeen = false
     for (const spec of state.lights) {
       const color = new Color(resolvePaint(spec.color))
       const intensity = Math.max(0, spec.intensity)
@@ -392,7 +438,11 @@ function createEngine(host: HTMLDivElement): Engine | undefined {
       if (spec.kind === 'directional') {
         const light = new DirectionalLight(color, intensity)
         light.position.set(x, y, z)
-        armShadow(light)
+        // An explicit castShadow wins; otherwise only the first directional
+        // casts, so a fill light cannot throw a second, contradictory shadow.
+        const casts = spec.castShadow ?? !directionalSeen
+        directionalSeen = true
+        if (casts) armShadow(light, spec.shadow)
         scene.add(light)
         lights.push(light)
         continue
@@ -412,9 +462,10 @@ function createEngine(host: HTMLDivElement): Engine | undefined {
       let entry = entries.get(object.id)
       if (entry === undefined) {
         const mesh = new Mesh(buildGeometry(object), materialFor(object))
-        // Wireframes are line art, not solids: they must not throw a filled shadow.
-        mesh.castShadow = object.wireframe !== true
-        mesh.receiveShadow = true
+        // Opaque solids cast; wireframes and transparent shells do not, unless
+        // the document says otherwise. A glass bulb must not throw a solid shadow.
+        mesh.castShadow = object.castShadow ?? (object.wireframe !== true && (object.opacity ?? 1) >= 0.99)
+        mesh.receiveShadow = object.receiveShadow ?? true
         scene.add(mesh)
         entry = {
           mesh,
@@ -443,7 +494,8 @@ function createEngine(host: HTMLDivElement): Engine | undefined {
       const [px, py, pz] = object.position
       const [rx, ry, rz] = object.rotation
       const [sx, sy, sz] = object.scale
-      entry.mesh.castShadow = object.wireframe !== true
+      entry.mesh.castShadow = object.castShadow ?? (object.wireframe !== true && (object.opacity ?? 1) >= 0.99)
+      entry.mesh.receiveShadow = object.receiveShadow ?? true
       entry.mesh.position.set(px, py, pz)
       entry.mesh.rotation.set(radians(rx), radians(ry), radians(rz))
       entry.baseScale.set(Math.abs(sx) || 0.0001, Math.abs(sy) || 0.0001, Math.abs(sz) || 0.0001)
@@ -499,6 +551,141 @@ function createEngine(host: HTMLDivElement): Engine | undefined {
     camera.aspect = width / height
     camera.updateProjectionMatrix()
     dirty = true
+  }
+
+  /**
+   * Hide the lit surfaces of every object while keeping them in the shadow pass.
+   *
+   * `debug: 'shadow-only'` exists so the model can look at the *shape* of the
+   * scene — silhouettes and contact shadows — without the material colors hiding
+   * mistakes in placement. Setting `visible = false` would remove the objects
+   * from the shadow map too (the renderer skips invisible objects), so instead
+   * only their color and depth writes are silenced: they still cast shadows onto
+   * the `ShadowMaterial` floor, and nothing of their own surface reaches the
+   * frame.
+   * @returns a function that restores every material, the grid and the ground group.
+   */
+  function hideSurfaces(): () => void {
+    const saved: { material: MeshStandardMaterial; colorWrite: boolean; depthWrite: boolean }[] = []
+    for (const entry of entries.values()) {
+      const materials = Array.isArray(entry.mesh.material) ? entry.mesh.material : [entry.mesh.material]
+      for (const material of materials) {
+        if (!(material instanceof MeshStandardMaterial)) continue
+        saved.push({ material, colorWrite: material.colorWrite, depthWrite: material.depthWrite })
+        material.colorWrite = false
+        material.depthWrite = false
+      }
+    }
+    const gridWasVisible = grid === undefined ? false : grid.visible
+    const groundWasVisible = ground.visible
+    if (grid !== undefined) grid.visible = false
+    // `update()` ties the whole ground group to the document's `grid` flag, but a
+    // shadow-only frame is read *through* the floor: without the catcher a board
+    // with `grid: false` would answer with a blank picture, so the catcher (not
+    // the grid) is forced on for this one render.
+    ground.visible = true
+    return () => {
+      for (const item of saved) {
+        item.material.colorWrite = item.colorWrite
+        item.material.depthWrite = item.depthWrite
+      }
+      if (grid !== undefined) grid.visible = gridWasVisible
+      ground.visible = groundWasVisible
+    }
+  }
+
+  /**
+   * Paint one id label per object whose position projects inside the frame.
+   *
+   * The labels use the *live* orbit camera, which is why this cannot live in the
+   * tab: the model needs the ids of what it can see right now, not of the
+   * document's default framing. Anything behind the viewer (`z > 1` after the
+   * perspective divide) or outside the NDC box is skipped rather than clamped to
+   * an edge, where a label would point at empty space.
+   */
+  function drawObjectLabels(
+    context: CanvasRenderingContext2D,
+    width: number,
+    height: number,
+    viewport: CaptureViewport,
+  ): void {
+    const unit = width / Math.max(1, viewport.width)
+    const point = new Vector3()
+    for (const [id, entry] of entries) {
+      point.copy(entry.mesh.position).project(camera)
+      if (point.z > 1 || point.x < -1 || point.x > 1 || point.y < -1 || point.y > 1) continue
+      drawIdLabel(context, (point.x + 1) * 0.5 * width, (1 - point.y) * 0.5 * height, id, unit)
+    }
+  }
+
+  /**
+   * Take one frame of the scene as the user sees it right now.
+   *
+   * The normal animation loop only renders when something moved, so the capture
+   * renders explicitly, then copies the WebGL buffer onto an opaque 2D canvas
+   * (`preserveDrawingBuffer` is what makes that copy contain the frame at all).
+   * The copy is also where the `ids` overlay and the optional downscale happen —
+   * the live stage is never touched.
+   * @param options - requested overlay/debug state and output size.
+   * @returns the PNG, the live camera and the stage viewport.
+   */
+  function capture(options: CaptureOptions): Board3DFrame {
+    // A collapsed panel has no pixels to take (and resizing the renderer to its
+    // 0×0 box would also throw away the last good frame): fail with a message the
+    // model can act on instead of answering with a 1×1 picture.
+    if (host.clientWidth === 0 || host.clientHeight === 0) {
+      throw new Error('the 3D stage is not on screen')
+    }
+    // The panel may have been resized between the observer's last callback and
+    // this request; a stale backing store would pair the pixels with a viewport
+    // that does not describe them.
+    resize()
+    const restore = options.debug === 'shadow-only' ? hideSurfaces() : undefined
+    try {
+      placeCamera()
+      renderer.render(scene, camera)
+      const viewport: CaptureViewport = {
+        width: Math.max(1, host.clientWidth),
+        height: Math.max(1, host.clientHeight),
+        dpr: globalThis.devicePixelRatio || 1,
+      }
+      const source = renderer.domElement
+      const size = captureSize(
+        source.width,
+        source.height,
+        captureWidthLimit(options.maxWidth, DEFAULT_CAPTURE_WIDTH),
+      )
+      const output = document.createElement('canvas')
+      output.width = size.width
+      output.height = size.height
+      const context = output.getContext('2d')
+      if (context === null) throw new Error('cannot create a 2D context for the capture')
+      // The WebGL buffer is transparent wherever the scene painted nothing (no
+      // background, an alpha material); the board surface is what the user sees
+      // behind it, so the frame starts from that paint.
+      context.fillStyle = surfacePaint()
+      context.fillRect(0, 0, output.width, output.height)
+      context.imageSmoothingEnabled = true
+      context.imageSmoothingQuality = 'high'
+      context.drawImage(source, 0, 0, output.width, output.height)
+      if (options.overlay === 'ids') drawObjectLabels(context, output.width, output.height, viewport)
+      return {
+        png: encodePng(output),
+        width: output.width,
+        height: output.height,
+        camera: {
+          position: [camera.position.x, camera.position.y, camera.position.z],
+          target: [orbit.target.x, orbit.target.y, orbit.target.z],
+          fov: camera.fov,
+        },
+        viewport,
+      }
+    } finally {
+      restore?.()
+      // The frame just rendered is the debug one, not the picture the board is
+      // in: without this flag the animation loop would leave it on screen.
+      dirty = true
+    }
   }
 
   // ---- pointer orbit / pan / dolly (no addons) ----
@@ -611,6 +798,7 @@ function createEngine(host: HTMLDivElement): Engine | undefined {
   return {
     update,
     resize,
+    capture,
     resetCamera(next: Camera3D): void {
       applyCamera(next)
     },
@@ -647,10 +835,10 @@ function createEngine(host: HTMLDivElement): Engine | undefined {
 
 /**
  * The 3D surface.
- * @param props - the scene document and the camera-reset counter.
+ * @param props - the scene document, the camera-reset counter, and the capture ref.
  * @returns the WebGL canvas, or a readable notice when WebGL is unavailable.
  */
-export function Board3D({ scene, resetKey, hint, fallback }: Board3DProps) {
+export function Board3D({ scene, resetKey, hint, fallback, captureRef }: Board3DProps) {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const engineRef = useRef<Engine | undefined>(undefined)
   const [failure, setFailure] = useState(false)
@@ -678,6 +866,23 @@ export function Board3D({ scene, resetKey, hint, fallback }: Board3DProps) {
       engine.dispose()
     }
   }, [])
+
+  // The capture handle delegates through `engineRef` so it does not have to know
+  // when the engine was created, and so the ref object it lives in can be a
+  // stable parent `useRef` — the engine effect above deliberately runs once.
+  useEffect(() => {
+    if (captureRef === undefined) return undefined
+    captureRef.current = {
+      capture: (options: CaptureOptions): Board3DFrame => {
+        const engine = engineRef.current
+        if (engine === undefined) throw new Error('the 3D stage is not ready')
+        return engine.capture(options)
+      },
+    }
+    return () => {
+      captureRef.current = undefined
+    }
+  }, [captureRef])
 
   useEffect(() => {
     engineRef.current?.update(scene)
