@@ -333,9 +333,26 @@ was run live on an isolated dev Host (port 57091, throwaway `DSH_HOME`): the mod
 drew a three-layer 3D bulb, called `whiteboard_look` for the lit frame and again for the shadow-only frame,
 and reported that the glass shade cast no solid shadow and that the shadow fell right/back from the
 zero-intensity shadow light. A second conversation confirmed the manifest reports `theme: "dark"` and
-`castShadow.accepted: true`. The remaining harness gap is portability: `scripts/dev.mjs` and `scripts/e2e.mjs`
-still drive `cmd.exe`, so the macOS run used a manually created dev home and the browser MCP; a cross-platform
-e2e script is the next piece of work.
+`castShadow.accepted: true`.
+
+**Harness portability: closed.** The gap was that `scripts/dev.mjs` drove `cmd.exe`, `netstat`,
+`tasklist` and `taskkill`, so nothing but Windows could run the dev loop. There are exactly five
+OS-specific operations, and they now live in `scripts/platform.mjs` with a branch each: `cmd /d /s /c`
+vs `/bin/sh -c`, `netstat -ano` vs `lsof -t` for the port's owner, `signal 0` for liveness (no external
+tool at all), and `taskkill /T /F` vs a signal to the detached process group. Nothing else in `dev.mjs`
+asks which OS it is on, so the platform layer is the whole portability surface — which is what makes it
+testable: `scripts/platform.test.mjs` runs a set of hostile arguments through the *real* shell and
+back, and covers both parsers, liveness and listener detection; `pnpm run check` includes it.
+
+Both branches were exercised, not assumed: Windows end to end (`setup → start → status → logs → stop`
+against a real Host on 57090 — ready in 2.9 s, host pid found through `netstat`, port released on stop
+with no strays) and Debian under WSL for the primitive layer (`sh` quoting round-trip, `lsof` naming
+the test process as its own listener, `dev.mjs help/status` talking to `lsof`). The POSIX *Host boot*
+is the one path that machine cannot prove, because `dsh` is not installed there; CI covers the rest.
+
+What is still machine-specific is finding Playwright, not the OS: `scripts/pw.mjs` prefers
+`WBDEV_PLAYWRIGHT_DIR`, so a fresh machine points that at a `playwright-core` instead of the harness
+growing a dependency it deliberately does not have.
 
 **Released as 0.3.0.** The v3 work reached `main` still labelled `0.2.2`, so `0.3.0` is the version
 that names it: `lib/index.js` 139,767 B `7fb9bacd6b83b82b`, `lib/client.js` 550,511 B

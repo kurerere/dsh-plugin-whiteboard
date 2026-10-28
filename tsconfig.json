@@ -5,6 +5,11 @@
     "target": "es2024",
     "module": "esnext",
     "moduleResolution": "bundler",
+    // The emitted declarations are committed and their bytes are recorded in
+    // notes/harness.md, so the newline must not depend on the OS tsc runs on: without
+    // this, a Windows build writes CRLF, the tree reads as dirty after every
+    // `pnpm run types`, and the recorded hashes stop describing a checkout.
+    "newLine": "lf",
     "jsx": "react-jsx",
     "lib": ["ES2024", "DOM", "DOM.Iterable", "ESNext.Disposable"],
     "types": ["node"],

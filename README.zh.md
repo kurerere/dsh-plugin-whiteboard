@@ -105,6 +105,11 @@ node scripts/dev.mjs stop
 
 设计说明（含“为什么画板状态不放在会话日志里”的取证）见 [notes/design.md](notes/design.md)。
 
+开发脚本在 Windows / macOS / Linux 上都能跑：系统相关的那几件事（用哪个 shell、哪个进程占着端口、
+进程还在不在、怎么结束进程树）只集中在 `scripts/platform.mjs`，两个分支由 `scripts/platform.test.mjs`
+覆盖，也进了 `pnpm run check`。`scripts/e2e.mjs` 用你机器上已有的 Playwright，不额外装一个：机器上没有
+时把 `WBDEV_PLAYWRIGHT_DIR` 指向一个 `playwright-core` 包。
+
 ## 兼容性
 
 | | |

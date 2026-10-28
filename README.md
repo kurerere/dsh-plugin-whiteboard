@@ -118,6 +118,12 @@ node scripts/dev.mjs stop
 Design notes, including the evidence for why the board is not a session projection, are in
 [notes/design.md](notes/design.md).
 
+The harness runs on Windows, macOS and Linux. The OS-specific parts — which shell runs a command, which
+process holds the port, whether a pid is alive, how a process tree dies — live in one file,
+`scripts/platform.mjs`, and `scripts/platform.test.mjs` covers both branches; `pnpm run check` runs it.
+`scripts/e2e.mjs` uses the Playwright already on your machine instead of installing one: point
+`WBDEV_PLAYWRIGHT_DIR` at a `playwright-core` package when the workspace has none.
+
 ## Compatibility
 
 | | |

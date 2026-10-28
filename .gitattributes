@@ -1,0 +1,8 @@
+# One line-ending policy, on every platform.
+#
+# The built bundles in lib/ are committed as LF and their sha256 is recorded in
+# notes/harness.md. On a machine with core.autocrlf=true (the Windows default) git
+# materializes those files as CRLF, so a rebuild that writes LF left `git status`
+# reporting the tree dirty although the blobs were byte-identical — and the recorded
+# hashes stopped describing the bytes a Windows checkout actually had on disk.
+* text=auto eol=lf

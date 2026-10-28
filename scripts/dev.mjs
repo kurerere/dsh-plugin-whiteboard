@@ -28,7 +28,7 @@
  *
  * Everything is plain Node (no dependencies) so it runs without a build step.
  */
-import { spawn, spawnSync } from 'node:child_process'
+import { spawnSync } from 'node:child_process'
 import {
   closeSync, copyFileSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync,
   statSync, writeFileSync, writeSync,
@@ -37,6 +37,11 @@ import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+// The OS-specific primitives (shell, detach, port owner, liveness, teardown). Everything
+// in this file is platform-neutral; see scripts/platform.mjs for the five that are not.
+import {
+  isAlive, killTree, listenerPid, quoteArgv, runShell, spawnDetached,
+} from './platform.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PLUGIN_DIR = resolve(HERE, '..')
@@ -207,42 +212,11 @@ function hostEnv(home) {
   return env
 }
 
-const COMSPEC = process.env.ComSpec || 'cmd.exe'
-
-/** One argument, quoted for cmd.exe when it needs it. */
-function quoteArg(arg) {
-  const s = String(arg)
-  return /[\s"&|<>^]/.test(s) ? `"${s.replace(/"/g, '\\"')}"` : s
-}
-
-/** Run a shell command line through cmd.exe (batch launchers such as dsh.cmd need a
- *  shell; spawning through ComSpec explicitly keeps Node's shell:true deprecation
- *  warning out of the output and the quoting ours). */
-function runCmd(cmdline, { cwd, env, timeout = 300_000 } = {}) {
-  const res = spawnSync(COMSPEC, ['/d', '/s', '/c', `"${cmdline}"`], {
-    cwd,
-    env,
-    encoding: 'utf8',
-    timeout,
-    windowsHide: true,
-    // Node's shell:true does exactly this; without it Node re-quotes the single
-    // /c argument and cmd.exe sees literal backslash-escaped quotes.
-    windowsVerbatimArguments: true,
-  })
-  return {
-    status: res.status,
-    out: `${res.stdout ?? ''}${res.stderr ?? ''}`.trim(),
-    error: res.error,
-  }
-}
-
-/** Run the dsh CLI (`dsh` is on PATH — .../runtime/cli/bin/dsh.cmd). */
+/** Run the dsh CLI. Windows ships it as a batch launcher (`dsh.cmd`) and POSIX as an
+ *  executable script, so one shell invocation covers both — the platform branch lives
+ *  in runShell, not here. */
 function runDsh(args, { home, cwd = PLUGIN_DIR, timeout = 300_000 } = {}) {
-  return runCmd(['dsh', ...args].map(quoteArg).join(' '), { cwd, env: hostEnv(home), timeout })
-}
-
-function run(cmd, args, { cwd, timeout = 300_000 } = {}) {
-  return runCmd([cmd, ...args].map(quoteArg).join(' '), { cwd, timeout })
+  return runShell(quoteArgv(['dsh', ...args]), { cwd, env: hostEnv(home), timeout })
 }
 
 async function probeHttp(url, timeoutMs = 1500) {
@@ -256,31 +230,6 @@ async function probeHttp(url, timeoutMs = 1500) {
   } catch (err) {
     return { error: err?.code ?? err?.name ?? String(err) }
   }
-}
-
-/** Pid of the process LISTENING on a TCP port, via netstat (0.0.0.0 / [::] / 127.0.0.1). */
-function listenerPid(port) {
-  const res = run('netstat', ['-ano', '-p', 'tcp'])
-  for (const line of res.out.split(/\r?\n/)) {
-    const cols = line.trim().split(/\s+/)
-    if (cols.length < 5) continue
-    const [, local, , state, pid] = cols
-    if (!String(local).endsWith(`:${port}`)) continue
-    if (state !== 'LISTENING') continue
-    return Number(pid)
-  }
-  return 0
-}
-
-function isAlive(pid) {
-  if (!pid) return false
-  const res = run('tasklist', ['/FI', `PID eq ${pid}`, '/NH', '/FO', 'CSV'])
-  return res.out.includes(`,"${pid}",`) || new RegExp(`^"([^"]+)","${pid}",`, 'm').test(res.out)
-}
-
-function taskkill(pid) {
-  if (!pid) return
-  run('taskkill', ['/PID', String(pid), '/T', '/F'])
 }
 
 function tailFile(path, lines = 80) {
@@ -536,16 +485,11 @@ async function start(opts) {
 
   // Launcher flags (--patch) come before the app's own args (--port, --no-open).
   const args = ['--profile', opts.profile, '--patch', p.configPatch, '--port', String(opts.port), '--no-open']
-  const cmdline = ['dsh', ...args].map(quoteArg).join(' ')
-  const child = spawn(COMSPEC, ['/d', '/s', '/c', `"${cmdline}"`], {
+  const child = spawnDetached(quoteArgv(['dsh', ...args]), {
     cwd: PLUGIN_DIR,
     env: hostEnv(p.home),
-    detached: true,
-    windowsHide: true,
     stdio: ['ignore', fd, fd],
-    windowsVerbatimArguments: true,
   })
-  child.unref()
   closeSync(fd)
 
   const state = {
@@ -571,7 +515,8 @@ async function start(opts) {
   }
 
   state.url = ready
-  // The detached launcher is cmd.exe; the Host that owns the port is its child.
+  // The detached launcher is a shell (cmd.exe or /bin/sh); the Host that owns the port
+  // is its child, which is why the pid reported here is a launcher and not the Host.
   state.hostPid = listenerPid(opts.port) || child.pid
   state.launcherPid = child.pid
   writeHost(opts, state)
@@ -621,7 +566,7 @@ async function stop(opts, { quiet = false } = {}) {
   let killed = 0
   for (const pid of pids) {
     if (!isAlive(pid)) continue
-    taskkill(pid)
+    await killTree(pid)
     killed++
     if (!quiet) log(`dev: stopped pid ${pid} (port ${port})`)
   }
@@ -629,7 +574,7 @@ async function stop(opts, { quiet = false } = {}) {
   for (let i = 0; i < 20; i++) {
     const busy = listenerPid(port)
     if (!busy) break
-    taskkill(busy)
+    await killTree(busy)
     killed++
     if (!quiet) log(`dev: stopped leftover listener pid ${busy} on port ${port}`)
     await sleep(250)
@@ -696,7 +641,7 @@ function printUrl(opts) {
 
 async function rebuild(opts) {
   log('dev: pnpm run build')
-  const res = runCmd('pnpm run build', {
+  const res = runShell(quoteArgv(['pnpm', 'run', 'build']), {
     cwd: PLUGIN_DIR,
     env: hostEnv(paths(opts).home),
     timeout: 600_000,
@@ -710,7 +655,9 @@ async function rebuild(opts) {
   const wb = buildState(PLUGIN_DIR)
   if (!wb.built) die('build exited 0 but lib/index.js or lib/client.js is missing')
   log(`dev: built lib/index.js ${wb.index.size}B sha=${wb.index.sha256} / lib/client.js ${wb.client.size}B sha=${wb.client.sha256}`)
-  stop(opts, { quiet: true })
+  // Awaited: teardown is asynchronous on both platforms (taskkill / SIGTERM→SIGKILL),
+  // and starting the new Host before the old one released the port is a race.
+  await stop(opts, { quiet: true })
   await start(opts)
 }
 
