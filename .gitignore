@@ -1,0 +1,5 @@
+node_modules/
+lib/types/**/*.map
+*.tsbuildinfo
+.DS_Store
+dev/cordis.dev.yml

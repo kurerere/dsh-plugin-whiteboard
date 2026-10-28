@@ -1,0 +1,357 @@
+/* dsh-plugin-whiteboard — every selector is prefixed with `dshwb-`.
+ *
+ * Only shipped theme tokens are used (`--dsw-*` / `--dsh-*`), so the board reads
+ * as part of the shell in both palettes: surfaces come from the alias layers, the
+ * artboard carries the shipped elevation material, and the input row uses the
+ * shell's input surface vocabulary. No literal colors live here.
+ */
+
+.dshwb-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+
+  /* Text that is quiet but still has to be read: the shape count, the stale
+   * badge, the empty-state body, the input placeholder, the composer hint, the
+   * WebGL notices. Tertiary is the shell's own hint colour, and on the dark
+   * surface it is legible; on the light panel it measures 3.71:1 on `#fff`,
+   * which is below AA for body-sized text. The light override below raises only
+   * those quiet labels to the secondary label (5.8:1) — the same alias the
+   * canvas side resolves `muted` to, so the chrome and the drawing cannot drift
+   * apart. */
+  --dshwb-quiet: var(--dsw-alias-label-tertiary);
+}
+
+body:not([data-ds-dark-theme]) .dshwb-root {
+  --dshwb-quiet: var(--dsw-alias-label-secondary);
+}
+
+.dshwb-grow {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---- example prompts on an empty board ---- */
+
+.dshwb-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin: 2px 0 0;
+}
+
+.dshwb-chip {
+  corner-shape: round;
+  padding: 5px 11px;
+  border: 0.5px solid var(--dsw-alias-border-l3);
+  border-radius: 999px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: background-color var(--ds-transition-duration-fast, 0.1s),
+    color var(--ds-transition-duration-fast, 0.1s),
+    border-color var(--ds-transition-duration-fast, 0.1s);
+}
+
+.dshwb-chip:hover {
+  border-color: var(--dsw-alias-border-l4);
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+.dshwb-chip:focus-visible {
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: 1px;
+}
+
+/* ---- board column ---- */
+
+.dshwb-board {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.dshwb-bar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 4px 8px 4px 10px;
+  border-bottom: 0.5px solid var(--dsw-alias-border-l2);
+}
+
+/* The mode control is the one thing that must never be squeezed: a long status
+ * line in the meta slot yields instead, and the actions keep their 26px. */
+.dshwb-bar > [role='tablist'] {
+  flex: none;
+}
+
+.dshwb-meta {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--dshwb-quiet);
+  font-size: 12px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dshwb-meta[data-tone='error'] {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+.dshwb-meta[data-tone='status'] {
+  color: var(--dsw-alias-label-secondary);
+}
+
+/* The three surface actions are icon-only so the bar stays one line at the
+ * sidebar's minimum width; each carries an aria-label and a tooltip. */
+.dshwb-bar .dshwb-iconBtn {
+  width: 26px;
+  min-width: 26px;
+  height: 26px;
+  padding: 0;
+  gap: 0;
+}
+
+.dshwb-bar .dshwb-iconBtn--armed {
+  color: var(--dsw-alias-state-error-primary);
+  border-color: var(--dsw-alias-state-error-primary);
+}
+
+.dshwb-stale {
+  flex: none;
+  padding: 1px 6px;
+  corner-shape: round;
+  border-radius: 999px;
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dshwb-quiet);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+/* ---- stage ---- */
+
+.dshwb-stage {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ---- 2D artboard ---- */
+
+.dshwb-page {
+  position: relative;
+  overflow: hidden;
+  border-radius: var(--dsw-radius-md);
+  background: var(--dsw-alias-bg-layer-1);
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l2);
+  box-shadow: var(--dsw-elevation-soft);
+}
+
+.dshwb-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* ---- 3D stage ---- */
+
+.dshwb-stage3d {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
+.dshwb-stage3dHost {
+  position: absolute;
+  inset: 0;
+}
+
+.dshwb-gl {
+  display: block;
+  width: 100%;
+  height: 100%;
+  touch-action: none;
+  cursor: grab;
+}
+
+.dshwb-gl[data-dragging='orbit'] {
+  cursor: grabbing;
+}
+
+.dshwb-gl[data-dragging='pan'] {
+  cursor: move;
+}
+
+.dshwb-stage3d--failed {
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  color: var(--dshwb-quiet);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+}
+
+.dshwb-stageNotice {
+  max-width: 300px;
+  margin: 0;
+  color: var(--dshwb-quiet);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: center;
+}
+
+.dshwb-stageAction {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--dsw-radius-sm);
+  background: var(--dsw-specific-menu);
+  --dsw-elevation-stroke-color: var(--dsw-alias-border-l2);
+  box-shadow: var(--dsw-elevation-panel);
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+
+.dshwb-stageAction:hover {
+  background: var(--dsw-alias-interactive-bg-hover);
+  color: var(--dsw-alias-label-primary);
+}
+
+/* ---- empty-board hint ---- */
+
+.dshwb-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  padding: 16px;
+  pointer-events: none;
+}
+
+.dshwb-boardHint {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  max-width: 320px;
+  text-align: center;
+}
+
+.dshwb-boardHintTitle {
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 13px;
+  font-weight: 520;
+  line-height: 20px;
+}
+
+.dshwb-boardHintBody {
+  margin: 0 0 2px;
+  color: var(--dshwb-quiet);
+  font-size: 12px;
+  line-height: 18px;
+  text-wrap: pretty;
+}
+
+/* ---- input row ---- */
+
+.dshwb-composer {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px var(--dsh-composer-side-clearance, 8px) 8px;
+  border-top: 0.5px solid var(--dsw-alias-border-l2);
+}
+
+.dshwb-composerRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dshwb-input {
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 32px;
+  margin: 0;
+  padding: 0 10px;
+  border: 0.5px solid var(--dsw-alias-border-l2);
+  border-radius: var(--dsw-radius-md);
+  outline: none;
+  background: var(--dsw-specific-input-major, var(--dsw-alias-bg-layer-1));
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: var(--dsh-content-font-size, 14px);
+  line-height: 20px;
+}
+
+.dshwb-input::placeholder {
+  color: var(--dshwb-quiet);
+}
+
+.dshwb-input:focus-visible {
+  border-color: var(--dsw-alias-border-l4);
+  outline: var(--dsw-focus-ring-width, 2px) solid var(--dsw-focus-ring-color, var(--dsw-alias-state-business-primary));
+  outline-offset: -1px;
+}
+
+.dshwb-composerHint,
+.dshwb-composerError {
+  overflow: hidden;
+  margin: 0;
+  padding: 0 2px;
+  font-size: 11px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dshwb-composerHint {
+  color: var(--dshwb-quiet);
+}
+
+.dshwb-composerError {
+  color: var(--dsw-alias-state-error-primary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dshwb-chip {
+    transition: none;
+  }
+}

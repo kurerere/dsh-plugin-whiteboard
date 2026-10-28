@@ -1,0 +1,13 @@
+{
+  // Emits the public declaration surface (Host face + wire types) to lib/types.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "rewriteRelativeImportExtensions": true,
+    "rootDir": "src",
+    "outDir": "lib/types"
+  },
+  "include": ["src/index.ts", "src/shared.ts", "src/css.d.ts"]
+}
