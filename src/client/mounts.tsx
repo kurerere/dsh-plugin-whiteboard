@@ -167,12 +167,21 @@ export type WhiteboardTabProps =
 /** The part of the sidebar's live tab info this body reads. */
 interface TabInfoFace {
   readonly tab: { readonly visible: boolean }
+  readonly sidebar: { readonly fullscreen: boolean }
 }
 
 /**
  * Right-sidebar tab body for the Session the sidebar belongs to.
+ *
+ * The tab is a **view** of the board. It offers its own input only when the
+ * conversation's composer is out of view — i.e. while the panel is presented
+ * fullscreen. Docked beside the conversation, a second input would be a strictly
+ * weaker duplicate of the one already on screen (no attachments, no `@`
+ * references, no stop, no queue/steer choice) and, worse, a second draft: text
+ * typed here is invisible in the main composer and vice versa. One conversation,
+ * one input; the panel gets its own only when it is the whole window.
  * @param props - session-scoped tab props (the main Session) and the injected face.
- * @returns the board of this conversation plus the input that talks to it.
+ * @returns the board of this conversation, plus its input in the fullscreen case.
  */
 export function WhiteboardTab(props: WhiteboardTabProps) {
   const { sessionId, useSession, say, clear, undo, drafts, t } = props
@@ -182,7 +191,9 @@ export function WhiteboardTab(props: WhiteboardTabProps) {
   // `useTabInfo` is the sidebar's own answer; the board also re-checks the DOM at
   // key time in case a host ever renders the body without binding it.
   const readInfo = props.useTabInfo as (() => TabInfoFace) | undefined
-  const visible = readInfo?.().tab.visible
+  const info = readInfo?.()
+  const visible = info?.tab.visible
+  const standalone = info?.sidebar.fullscreen === true
 
   /** Put an example prompt in the input (never send it). */
   const fill = useCallback((text: string) => {
@@ -191,17 +202,20 @@ export function WhiteboardTab(props: WhiteboardTabProps) {
   }, [drafts, sessionId])
 
   return (
-    <div className="dshwb-root" data-whiteboard={sessionId}>
+    <div className="dshwb-root" data-whiteboard={sessionId} data-standalone={standalone ? 'true' : 'false'}>
       <WhiteboardBoard
         sessionId={sessionId}
         running={running}
         visible={visible}
+        standalone={standalone}
         clear={clear}
         undo={undo}
         onPick={fill}
         t={t}
       />
-      <WhiteboardComposer sessionId={sessionId} say={say} drafts={drafts} t={t} />
+      {standalone
+        ? <WhiteboardComposer sessionId={sessionId} say={say} drafts={drafts} t={t} />
+        : null}
     </div>
   )
 }
@@ -216,6 +230,11 @@ interface WhiteboardBoardProps {
   readonly running: boolean
   /** Whether the sidebar says this tab is visible; `undefined` when it cannot say. */
   readonly visible: boolean | undefined
+  /**
+   * Whether the tab owns its input (panel fullscreen). False while docked beside
+   * the conversation, where the main composer is the only input.
+   */
+  readonly standalone: boolean
   readonly clear: WhiteboardTabInjected['clear']
   readonly undo: WhiteboardTabInjected['undo']
   /** Put an example prompt in the input. */
@@ -228,7 +247,7 @@ interface WhiteboardBoardProps {
  * @param props - session identity, the agent's running state, Host calls and copy.
  * @returns the board column (header bar and stage).
  */
-function WhiteboardBoard({ sessionId, running, visible, clear, undo, onPick, t }: WhiteboardBoardProps) {
+function WhiteboardBoard({ sessionId, running, visible, standalone, clear, undo, onPick, t }: WhiteboardBoardProps) {
   // A body the sidebar keeps mounted for a background Session or a collapsed
   // column stops polling until it is on screen again (an unknown answer polls).
   const { board, stale, canUndo } = useBoard(sessionId, running, visible !== false)
@@ -379,18 +398,27 @@ function WhiteboardBoard({ sessionId, running, visible, clear, undo, onPick, t }
   const stageReady = size.width > 0 && size.height > 0
   const empty = count === 0
 
+  // An empty board explains where the request goes, so the copy follows the input:
+  // docked, the conversation's own composer is on screen and is the only one; the
+  // tab only carries that sentence (and the example chips) when it owns the input.
   const hint: ReactNode = empty
     ? (
       <div className="dshwb-boardHint">
         <p className="dshwb-boardHintTitle">{t('board.empty.title')}</p>
-        <p className="dshwb-boardHintBody">{t('board.empty.body')}</p>
-        <div className="dshwb-chips">
-          {EXAMPLES.map(key => (
-            <button key={key} type="button" className="dshwb-chip" onClick={() => { onPick(t(key)) }}>
-              {t(key)}
-            </button>
-          ))}
-        </div>
+        <p className="dshwb-boardHintBody">
+          {t(standalone ? 'board.empty.body' : 'board.empty.bodyDocked')}
+        </p>
+        {standalone
+          ? (
+            <div className="dshwb-chips">
+              {EXAMPLES.map(key => (
+                <button key={key} type="button" className="dshwb-chip" onClick={() => { onPick(t(key)) }}>
+                  {t(key)}
+                </button>
+              ))}
+            </div>
+          )
+          : null}
       </div>
     )
     : undefined

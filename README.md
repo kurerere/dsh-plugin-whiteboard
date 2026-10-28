@@ -15,8 +15,9 @@ The board is not a second chat. It is the canvas **of this conversation**:
   the ordinary composer — no panel to open first.
 - The right-sidebar tab (`Ctrl+Shift+B` → new tab → **Whiteboard**) is a view of that board. Opening it
   creates no Session and starts no second context.
-- The input at the bottom of the tab sends a message into **this conversation**. It is the same thing
-  as typing in the main composer.
+- The tab only grows an input of its own when the panel is put **fullscreen** — that is the one case
+  where the conversation's composer is covered. Docked beside the conversation there is no second
+  input: one conversation, one input, one draft.
 
 ## Using it
 

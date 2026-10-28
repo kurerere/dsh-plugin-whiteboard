@@ -48,9 +48,15 @@ The Host owns the board document and the browser polls it:
 
 ## Sending
 
-The tab has its own single-line input and **never mounts the shipped composer**:
-the conversation already has one mounted in the main view, and two composers over
-one draft and one submit path is a conflict, not a feature.
+The tab has its own single-line input **only while the panel is presented
+fullscreen**, and **never mounts the shipped composer**: the conversation already
+has one mounted in the main view, and two composers over one draft and one submit
+path is a conflict, not a feature. Docked beside the conversation the tab shows
+that composer's territory only — no second input, no second draft. The gate is
+`tabInfo.sidebar.fullscreen`, so the input appears exactly when the shipped
+composer is covered by the panel; the empty-state copy follows the same gate
+(docked: 「在对话里说想画什么」, fullscreen: 「直接在下面的输入框说…」 plus the
+example chips, which only exist when there is an input to fill).
 
 The send path is the documented client service the shipped composer uses:
 

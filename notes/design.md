@@ -125,12 +125,19 @@ into the panel; 3D is world units, y up, ground at `y = 0`, default camera `(6.4
 - Right-sidebar tab kind `whiteboard`, id `dsh-plugin-whiteboard`, with a `guide` artwork entry
   next to the side chat's. The tab body slot is session-scoped, so its `sessionId` **is** the main
   Session: the tab retains nothing and creates nothing.
-- Tab body: the board viewport (flex 1) and a single-line input at the bottom. There is no
-  embedded conversation and no composer takeover — the input calls the same client path the main
-  composer uses (`ISession.beginSubmission` + `ISession.prompt`, for the local echo), falling back
-  to `POST /api/whiteboard.say` when this client holds no binding for the Session; the Host route
-  goes through `sessionController.prompt`, the composer's own admission path, so a cold Session is
-  resumed with its own preset and a duplicate `requestId` folds into the first send.
+- Tab body: the board viewport (flex 1) and — **only while the panel is presented fullscreen** — a
+  single-line input at the bottom. There is no embedded conversation and no composer takeover. The
+  gate is `tabInfo.sidebar.fullscreen`: docked beside the conversation the shipped composer is on
+  screen and is the only input, so a second one would be a strictly weaker duplicate (no
+  attachments, no `@` references, no stop, no queue/steer choice) and, worse, a second draft — text
+  typed there is invisible in the main composer and vice versa. Fullscreen is the one presentation
+  where that composer is covered, which is exactly when the tab needs its own. The input calls the
+  same client path the main composer uses (`ISession.beginSubmission` + `ISession.prompt`, for the
+  local echo), falling back to `POST /api/whiteboard.say` when this client holds no binding for the
+  Session; the Host route goes through `sessionController.prompt`, the composer's own admission
+  path, so a cold Session is resumed with its own preset and a duplicate `requestId` folds into the
+  first send. The empty-state copy follows the same gate: docked it points at the conversation, and
+  the example chips (which only fill the input) exist only when there is an input to fill.
 - View follow: the board shows whichever surface the model last touched and follows it (2D ↔ 3D);
   clicking the active mode pins the view, clicking again resumes following.
 - 2D renderer: one `<canvas>`, devicePixelRatio-aware, `Path2D` for `path` shapes, palette tokens

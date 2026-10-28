@@ -430,6 +430,9 @@ async function boardDom() {
         hint: Boolean(document.querySelector(sel.hint)),
         stale: Boolean(document.querySelector(sel.stale)),
         input: Boolean(document.querySelector(sel.input)),
+        // Whether the panel is fullscreen, i.e. whether the tab owns an input. The
+        // tab offers one only when the conversation's composer is out of view.
+        standalone: root?.getAttribute('data-standalone') ?? null,
         buttons: [...document.querySelectorAll(`${sel.root} button`)].map((b) => ({
           aria: b.getAttribute('aria-label'),
           text: (b.textContent ?? '').trim().slice(0, 12),
@@ -642,13 +645,48 @@ async function sendFromMainComposer(text) {
   throw new Error('main composer not found after 14 attempts')
 }
 
+/** The panel chrome's presentation control, by its shipped copy (zh and en). */
+const FULLSCREEN_ENTER = 'button[aria-label="全屏"], button[aria-label="Fullscreen"], button[title="全屏"], button[title="Fullscreen"]'
+const FULLSCREEN_EXIT = 'button[aria-label="退出全屏"], button[aria-label="Exit fullscreen"], button[title="退出全屏"], button[title="Exit fullscreen"]'
+
+/** Whether the tab currently owns an input (panel presented fullscreen). */
+const tabStandalone = () =>
+  page.evaluate(() => document.querySelector('.dshwb-root')?.getAttribute('data-standalone') === 'true')
+
+/**
+ * Put the panel into the presentation where the tab owns its input, or take it out.
+ *
+ * The tab deliberately offers an input only while the panel fills the window: docked
+ * beside the conversation, the shipped composer is the one input, so anything that
+ * wants to type in the tab has to enter the fullscreen presentation first.
+ * @param on - true to enter fullscreen, false to return to the docked column.
+ */
+async function setTabFullscreen(on) {
+  if (await tabStandalone() === on) return
+  const enter = page.locator(FULLSCREEN_ENTER)
+  const exit = page.locator(FULLSCREEN_EXIT)
+  const button = (await enter.count()) > 0 ? enter.first() : exit.first()
+  await button.click()
+  for (let i = 0; i < 25; i++) {
+    if (await tabStandalone() === on) {
+      await page.waitForTimeout(250)
+      return
+    }
+    await page.waitForTimeout(200)
+  }
+  throw new Error(`the panel did not ${on ? 'enter' : 'leave'} fullscreen`)
+}
+
 async function sendFromTabComposer(text) {
+  await setTabFullscreen(true)
   const input = page.locator(`${ROOT} ${INPUT}`)
   await input.click()
   await input.fill(text)
   await page.waitForTimeout(120)
   await input.press('Enter')
-  return Date.now()
+  const sent = Date.now()
+  await setTabFullscreen(false)
+  return sent
 }
 
 const transcriptText = () =>
@@ -893,7 +931,24 @@ async function phaseLoad() {
   check('whiteboard tab rendered', dom.present, dom.present ? '.dshwb-root' : '.dshwb-root missing')
   check('tab is keyed by the MAIN session', dom.sessionId === sid, `${dom.sessionId} vs ${sid}`)
   check('tab title is 画板', dom.tabTitles.includes('画板'), JSON.stringify(dom.tabTitles))
-  check('tab has its own composer input', dom.input, dom.input ? 'input.dshwb-input present' : 'missing')
+  // One conversation, one input: while the panel is docked beside the conversation,
+// the shipped composer is the only one, so the tab must not offer a second.
+check('docked tab offers no second input', !dom.input, dom.input ? 'input.dshwb-input present while docked' : 'none, as designed')
+check('docked tab reports it is not standalone', dom.standalone === 'false', `data-standalone=${dom.standalone}`)
+// …and it must offer one exactly when the panel fills the window and covers that composer.
+await setTabFullscreen(true)
+const wide = await boardDom()
+check('fullscreen tab offers its own input', wide.input, wide.input ? 'input.dshwb-input present' : 'missing')
+check('fullscreen tab reports it is standalone', wide.standalone === 'true', `data-standalone=${wide.standalone}`)
+check(
+  'fullscreen empty state points at the input it owns',
+  wide.hint ? !/在对话里说想画什么/.test(wide.text) : true,
+  wide.hint ? wide.text.slice(0, 120) : 'board not empty, copy not checked',
+)
+await shot(page, 'c-01b-fullscreen-input')
+await setTabFullscreen(false)
+const back = await boardDom()
+check('returning to the docked column drops the input again', !back.input, back.input ? 'input.dshwb-input still present' : 'gone')
   check('no 「开始画板」 CTA (no child session in C mode)', !/开始画板/.test(dom.text), dom.text.slice(0, 80))
   check('no 「正在绘制」 pill', !/正在绘制/.test(dom.text), dom.text.slice(0, 80))
   check(
