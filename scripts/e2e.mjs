@@ -585,10 +585,22 @@ async function waitForIdle(sid, timeoutMs = 240_000) {
 
 const barButton = (label) => page.getByRole('button', { name: label, exact: true })
 
+/**
+ * Switch the board's surface when the bar offers the switch.
+ *
+ * The 2D/3D control exists only when both surfaces have content — with one surface
+ * there is nothing to choose, because the board shows the one that has a drawing.
+ * So this returns false instead of failing when there is no control to click.
+ * @param mode - the surface to show.
+ * @returns whether a control was clicked.
+ */
 async function setView(mode) {
   const label = mode === '3d' ? '3D' : '2D'
-  await page.locator(`${ROOT} button`, { hasText: new RegExp(`^${label}$`) }).first().click()
+  const button = page.locator(`${ROOT} button`, { hasText: new RegExp(`^${label}$`) }).first()
+  if ((await button.count()) === 0) return false
+  await button.click()
   await page.waitForTimeout(1000)
+  return true
 }
 
 async function mainComposer() {
@@ -1043,7 +1055,15 @@ async function phaseHeadline() {
       ? `${cold.before.shapes}->${cold.after.shapes} shapes, ${cold.before.objects}->${cold.after.objects} objects; first mutation ~${cold.firstMutationMs ?? '?'} ms, first new content ~${cold.firstShapeMs ?? '?'} ms`
       : `no board change within ${opts.timeoutMs} ms (rev stayed ${cold.before.rev})`,
   )
-  check('the tab stayed closed while the model drew', (await page.locator(ROOT).count()) === 0, 'no .dshwb-root during the turn')
+  // The plugin opens the board by itself the first time a conversation's board
+  // gains content (once per conversation), so what used to be "the tab stayed
+  // closed" is now "nobody clicked, and the board came into view anyway".
+  const revealed = await waitFor(async () => (await page.locator(ROOT).count()) > 0, 12_000)
+  check(
+    'the first drawing opened the board by itself',
+    revealed.ok,
+    revealed.ok ? `the whiteboard tab appeared without a click (~${revealed.elapsedMs} ms after the turn started)` : 'the tab never opened',
+  )
   check('no Session was created by the drawing turn', listSessions().length === sessionsBefore.length, `${listSessions().length} sessions (was ${sessionsBefore.length})`)
   check('no legacy board document was created', listBoardDocs().filter((b) => b.legacy).length === legacyBefore, `${legacyBefore} legacy docs`)
 

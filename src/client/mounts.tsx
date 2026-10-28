@@ -254,6 +254,16 @@ function WhiteboardBoard({ sessionId, running, visible, standalone, clear, undo,
   const rev = board.rev
   const documentMode = board.mode
   const [view, setView] = useState<BoardMode>(documentMode)
+  // One surface needs no choice. While only one of the two surfaces has content the
+  // board shows that one, whatever the document's last touched surface says —
+  // clearing the 3D scene used to leave a board with 2D shapes looking empty. The
+  // 2D/3D switch therefore only exists when there really are two surfaces to switch
+  // between: the model normally picks one, and a permanent toggle would be chrome
+  // asking the user a question the model already answered.
+  const has2d = board.canvas.shapes.length > 0
+  const has3d = board.scene.objects.length > 0
+  const bothSurfaces = has2d && has3d
+  const surface: BoardMode = bothSurfaces ? view : has3d ? '3d' : '2d'
   const [pinned, setPinned] = useState(false)
   /**
    * The surface the clear button is armed for, not just "armed": arming 2D and
@@ -283,7 +293,7 @@ function WhiteboardBoard({ sessionId, running, visible, standalone, clear, undo,
   }, [documentMode, rev, pinned])
 
   // A pending confirmation belongs to the surface it was armed on.
-  useEffect(() => { setArmed(undefined) }, [view])
+  useEffect(() => { setArmed(undefined) }, [surface])
 
   useEffect(() => {
     if (armed === undefined) return undefined
@@ -314,16 +324,16 @@ function WhiteboardBoard({ sessionId, running, visible, standalone, clear, undo,
 
   const onClear = useCallback(() => {
     if (busyRef.current) return
-    if (armed !== view) {
-      setArmed(view)
+    if (armed !== surface) {
+      setArmed(surface)
       return
     }
     setArmed(undefined)
     setError(undefined)
-    clear(sessionId, view).catch((failure: unknown) => {
+    clear(sessionId, surface).catch((failure: unknown) => {
       setError(t('error.clear', { error: (failure as Error).message }))
     })
-  }, [armed, clear, sessionId, t, view])
+  }, [armed, clear, sessionId, surface, t])
 
   /**
    * Step the board back one Host mutation.
@@ -391,8 +401,8 @@ function WhiteboardBoard({ sessionId, running, visible, standalone, clear, undo,
     return () => { document.removeEventListener('keydown', onKeyDown) }
   }, [canUndo, onUndo, visible])
 
-  const count = surfaceCount(board, view)
-  const other: BoardMode = view === '2d' ? '3d' : '2d'
+  const count = surfaceCount(board, surface)
+  const other: BoardMode = surface === '2d' ? '3d' : '2d'
   const modeControl = `dshwb-mode-${sessionId}`
   const pageSize = Math.max(0, Math.min(size.width, size.height) - PAGE_INSET * 2)
   const stageReady = size.width > 0 && size.height > 0
@@ -426,7 +436,7 @@ function WhiteboardBoard({ sessionId, running, visible, standalone, clear, undo,
   // The bar is one line: the meta slot carries whichever of these matters now,
   // so adding actions never changes the row's height or wraps it. A pending clear
   // confirmation is only shown for the surface it was armed on.
-  const confirming = armed === view
+  const confirming = armed === surface
   const meta = error !== undefined
     ? { text: error, tone: 'error' as const }
     : confirming
@@ -434,20 +444,24 @@ function WhiteboardBoard({ sessionId, running, visible, standalone, clear, undo,
       : flash !== undefined
         ? { text: flash.text, tone: 'status' as const }
         : {
-          text: t(view === '3d' ? 'bar.objects' : 'bar.shapes', { count: String(count) }),
+          text: t(surface === '3d' ? 'bar.objects' : 'bar.shapes', { count: String(count) }),
           tone: 'count' as const,
         }
 
   return (
-    <div className="dshwb-board" data-view={view} data-pinned={pinned ? 'true' : 'false'} ref={boardRef}>
+    <div className="dshwb-board" data-view={surface} data-pinned={pinned ? 'true' : 'false'} ref={boardRef}>
       <div className="dshwb-bar">
-        <SegmentedControl
-          id={modeControl}
-          value={view}
-          label={t('bar.mode')}
-          onChange={choose}
-          options={[{ value: '2d', label: '2D' }, { value: '3d', label: '3D' }]}
-        />
+        {bothSurfaces
+          ? (
+            <SegmentedControl
+              id={modeControl}
+              value={surface}
+              label={t('bar.mode')}
+              onChange={choose}
+              options={[{ value: '2d', label: '2D' }, { value: '3d', label: '3D' }]}
+            />
+          )
+          : null}
         <span
           className="dshwb-meta"
           data-tone={meta.tone}
@@ -472,7 +486,7 @@ function WhiteboardBoard({ sessionId, running, visible, standalone, clear, undo,
             <IconDownloadOutlineRegular size={15} />
           </Button>
         </Tooltip>
-        <Tooltip label={confirming ? t('bar.clearConfirmHint', { mode: view === '3d' ? '3D' : '2D' }) : t('bar.clearHint')} side="bottom" delayMs={400}>
+        <Tooltip label={confirming ? t('bar.clearConfirmHint', { mode: surface === '3d' ? '3D' : '2D' }) : t('bar.clearHint')} side="bottom" delayMs={400}>
           <Button variant={confirming ? 'outline' : 'ghost'} size="sm"
             className={confirming ? 'dshwb-iconBtn dshwb-iconBtn--armed' : 'dshwb-iconBtn'}
             disabled={empty} onClick={onClear}
@@ -485,12 +499,12 @@ function WhiteboardBoard({ sessionId, running, visible, standalone, clear, undo,
       <div
         className="dshwb-stage"
         ref={stageRef}
-        id={`${modeControl}-${view}-panel`}
-        role="tabpanel"
-        aria-label={t(view === '3d' ? 'board.hint.3d' : 'board.hint.2d')}
+        id={bothSurfaces ? `${modeControl}-${surface}-panel` : undefined}
+        role={bothSurfaces ? 'tabpanel' : 'region'}
+        aria-label={t(surface === '3d' ? 'board.hint.3d' : 'board.hint.2d')}
       >
-        <div id={`${modeControl}-${other}-panel`} hidden />
-        {!stageReady ? null : view === '2d'
+        {bothSurfaces ? <div id={`${modeControl}-${other}-panel`} hidden /> : null}
+        {!stageReady ? null : surface === '2d'
           ? <Board2D canvas={board.canvas} size={pageSize} hint={hint} />
           : (
             <Board3D
@@ -500,7 +514,7 @@ function WhiteboardBoard({ sessionId, running, visible, standalone, clear, undo,
               fallback={<p className="dshwb-stageNotice">{t('webgl.unavailable')}</p>}
             />
           )}
-        {view === '3d' && count > 0
+        {surface === '3d' && count > 0
           ? (
             <Tooltip label={t('board.cameraReset')} side="left" delayMs={400}>
               <button type="button" className="dshwb-stageAction" aria-label={t('board.cameraReset')}

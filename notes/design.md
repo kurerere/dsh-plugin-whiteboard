@@ -138,8 +138,18 @@ into the panel; 3D is world units, y up, ground at `y = 0`, default camera `(6.4
   path, so a cold Session is resumed with its own preset and a duplicate `requestId` folds into the
   first send. The empty-state copy follows the same gate: docked it points at the conversation, and
   the example chips (which only fill the input) exist only when there is an input to fill.
-- View follow: the board shows whichever surface the model last touched and follows it (2D ↔ 3D);
-  clicking the active mode pins the view, clicking again resumes following.
+- View follow: when both surfaces have content the board shows whichever the model last touched, and the
+  `2D`/`3D` switch exists to change that. **With one surface there is nothing to choose**, so the switch is
+  not rendered at all and the board shows the surface that has content — which also fixed a real wart: a
+  cleared 3D scene used to leave a board full of 2D shapes looking empty, because the document's "last
+  touched" surface was the empty one. The model rarely uses both surfaces in one answer, so the common
+  case is now zero chrome instead of a question the model already answered.
+- Reveal: the board lives in the sidebar, so a drawing produced by an ordinary message is invisible until
+  somebody opens the tab. `./reveal.ts` watches the on-screen conversation's board and opens the tab the
+  **first** time that board's revision grows — once per conversation per page lifetime. The first
+  observation of a conversation only records its revision, so switching to a conversation that already has
+  a drawing never pops the panel; and once the tab is the active one the watcher stops, so an open board is
+  not polled twice. Verified live: the tab appeared **511 ms** after the turn started, with nobody clicking.
 - 2D renderer: one `<canvas>`, devicePixelRatio-aware, `Path2D` for `path` shapes, palette tokens
   resolved against the dsh theme, rAF only while dirty.
 - 3D renderer: three.js bundled into `lib/client.js`, custom orbit/zoom controller, PMREM

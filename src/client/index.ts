@@ -29,6 +29,7 @@ import { en, NS, zh, type WhiteboardKey } from './locales.ts'
 import { WhiteboardModel } from './model.ts'
 import { wakeBoard } from './poll.ts'
 import { WhiteboardTab, type WhiteboardTabInjected } from './mounts.tsx'
+import { createBoardReveal, type RevealSidebarFace } from './reveal.ts'
 import STYLES from './styles.css'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -153,5 +154,15 @@ export function apply(ctx: ClientContext): void {
       locale: NS,
       inject: () => tabFace,
     }, WhiteboardTab)), 'whiteboard: tab body')
+
+    // A drawing produced by an ordinary message is invisible until the tab is
+    // open, so the first drawing of the conversation on screen opens it — once,
+    // then never again for that conversation (see ./reveal.ts for why).
+    dock.effect(() => {
+      const controller = dock.get('sidebarRight') as RevealSidebarFace | undefined
+      if (controller === undefined) return () => {}
+      const reveal = createBoardReveal({ route, sidebar: controller, kind: TAB_KIND })
+      return () => { reveal.dispose() }
+    }, 'whiteboard: reveal the board on its first drawing')
   })
 }

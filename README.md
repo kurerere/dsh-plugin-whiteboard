@@ -27,11 +27,13 @@ The board is not a second chat. It is the canvas **of this conversation**:
 3. Keep talking to revise: "make the third box red", "add another branch on the right". The model
    updates existing shapes by id instead of repainting the board.
 
-The bar above the board is one line: `2D` / `3D`, the shape or object count, **Undo**, **Export**,
-**Clear**.
+The bar above the board is one line: the shape or object count, **Undo**, **Export**, **Clear** — plus a
+`2D` / `3D` switch on the left, which only exists when both surfaces actually have content.
 
-- **Follow**: the board shows whichever surface the model last drew on. Click the active mode to pin
-  the view; click it again to follow again.
+- **One surface, no question.** The model normally picks a surface, so the board simply shows the one that
+  has a drawing: clearing the 3D scene can no longer leave a board full of 2D shapes looking empty. The
+  switch appears only when there is something to switch between, and then follows whichever surface the
+  model last drew on.
 - **Undo**: step back one batch, from the bar or with `Ctrl+Z` (when the caret is not in a text field).
   A **Clear** can be undone too.
 - **Clear**: two clicks to confirm; it clears the current surface only.
@@ -44,6 +46,9 @@ The plugin adds no other buttons: the sidebar tab is the only entry point.
 - **It is part of the conversation.** The board document is Host state keyed by the Session id, and the
   drawing tools are the main agent's own tools — so drawing shows up in the transcript like any other
   tool call, and needs no explanation of "which chat knows what".
+- **It shows itself the first time.** The first time a conversation's board gains content, the sidebar
+  opens on it — once. After that the board is yours to open or ignore; returning to a conversation that
+  already has a drawing does not grab the panel.
 - **Live.** Every tool call writes the board document; the browser polls it while the tab is visible
   (tighter, about 350 ms, while the model is answering), so the drawing appears in layers.
 - **Durable.** Boards live in `<dsh home>/storages/whiteboard/<sessionId>.json` and survive reloads and
