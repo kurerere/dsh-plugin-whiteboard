@@ -495,3 +495,27 @@ Screenshots: `.wbdev-light/shots/light-quiet-labels.png`,
 (there the token values are far apart); in dark the aliases are `#cfd3d6`/`#adb2b8`, so
 the decisive dark evidence is the computed colour of the quiet elements.
 
+## 0.3.0 release (final bytes)
+
+v3 reached `main` still carrying `0.2.2`, and tag `v0.2.2` is the commit *before* it — so
+`dsh plugin add github:kurerere/dsh-plugin-whiteboard`, which installs the default branch, was
+handing out the five-tool capture build under the previous release's version number. 0.3.0 is the
+release that names that feature set: three tools became five (`whiteboard_look`, `whiteboard_api`),
+the route table grew to seven, and the preset became a queryable manifest.
+
+Final build: `lib/index.js` 139,767 B sha `7fb9bacd6b83b82b`, `lib/client.js` 550,511 B sha
+`ce141c3f7644f9d2`, both version 0.3.0.
+
+The bytes are the tested bytes. Rebuilding the parent commit reproduced its committed `lib/`
+blob-for-blob — `git hash-object` equal on `lib/index.js`, `lib/client.js` and every
+`lib/types/*.d.ts` — so this release differs from the v3 tree by **exactly two banner lines and the
+`package.json` version**, and the code the v3 run in `design.md` exercised is unchanged.
+
+Gate at this tree: `pnpm run check` green — typecheck, both bundles, declaration emit, artifact/wire
+contract (7 routes, 5 tools), **42/42 tests, 0 failed, 0 skipped**.
+
+Live evidence for this feature set is the v3 run recorded in `design.md` (isolated dev Host, port
+57091, throwaway `DSH_HOME`): the capture round trip, `whiteboard_look` for the lit frame and again
+for `debug: 'shadow-only'`, and a second conversation confirming `theme: "dark"` and
+`castShadow.accepted: true`. It was not re-run for the version bump, which changes no code.
+

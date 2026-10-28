@@ -336,3 +336,9 @@ zero-intensity shadow light. A second conversation confirmed the manifest report
 `castShadow.accepted: true`. The remaining harness gap is portability: `scripts/dev.mjs` and `scripts/e2e.mjs`
 still drive `cmd.exe`, so the macOS run used a manually created dev home and the browser MCP; a cross-platform
 e2e script is the next piece of work.
+
+**Released as 0.3.0.** The v3 work reached `main` still labelled `0.2.2`, so `0.3.0` is the version
+that names it: `lib/index.js` 139,767 B `7fb9bacd6b83b82b`, `lib/client.js` 550,511 B
+`ce141c3f7644f9d2`. Against the tree the v3 run above exercised, the only difference is the two bundle
+banners and the `package.json` version — rebuilding the parent commit reproduced its committed `lib/`
+blob for blob, so the release is the tested code.
