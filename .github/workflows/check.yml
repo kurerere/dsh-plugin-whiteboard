@@ -1,0 +1,42 @@
+name: check
+
+# This package ships its built bundles, so a green typecheck alone proves little: CI runs
+# the same gate a release does — typecheck, both bundles, declaration emit, the
+# artifact/wire contract, and the whole unit suite — on all three platforms.
+#
+# scripts/platform.test.mjs is the reason the matrix is not just ubuntu: its Windows and
+# POSIX branches can never both run on one machine, so a portability change is only
+# proven by running both.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run check
+      # platform.mjs is imported by dev.mjs, which the suite never loads, so a
+      # POSIX-only import error would pass every test above. One read-only command
+      # proves the harness itself starts on this OS and can talk to lsof/netstat
+      # (a missing tool only warns, so this never fails for that reason).
+      - run: node scripts/dev.mjs status --home .wbdev-smoke --port 57099
