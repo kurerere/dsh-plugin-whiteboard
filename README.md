@@ -11,7 +11,7 @@ appears stroke by stroke while the answer is still streaming.
 
 The board is not a second chat. It is the canvas **of this conversation**:
 
-- The three board tools belong to the **main agent**, so "draw a three-step sign-in flow" works from
+- The seven board tools belong to the **main agent**, so "draw a three-step sign-in flow" works from
   the ordinary composer — no panel to open first.
 - The right-sidebar tab (`Ctrl+Shift+B` → new tab → **Whiteboard**) is a view of that board. Opening it
   creates no Session and starts no second context.
@@ -56,7 +56,7 @@ The plugin adds no other buttons: the sidebar tab is the only entry point.
 - **Upgrades keep your drawings.** Boards from 0.1.x (the version that shipped its own chat) are
   migrated once onto the conversation they belonged to. A conversation that already has a board is
   never overwritten, and the old files are kept.
-- **Subagents do not draw.** A delegated subagent never sees the three board tools; it has work to do.
+- **Subagents do not draw.** A delegated subagent never sees the seven board tools; it has work to do.
 
 ## What it costs
 
@@ -64,7 +64,7 @@ Two fixed costs, stated plainly:
 
 | | |
 |---|---|
-| **Context tax** | The three tool declarations plus the drawing policy are resident in **every** main-session request: **8,460 characters** (5,461 of tool declarations + 2,999 of policy), about 2.3k tokens, whether you draw or not. The declarations started at 10,088 characters and are cut to 5,461; `scripts/face-budget.test.mjs` pins the ceiling so they cannot creep back. The stable prefix stays cacheable, so the practical cost is below the literal size. |
+| **Context tax** | The seven tool declarations plus the drawing policy are resident in **every** main-session request: **11,635 characters** (10,212 of tool declarations + 1,423 of policy), about 3.2k tokens, whether you draw or not. At 0.2.0 the three-tool set cost 8,460 characters in total (5,461 of declarations + 2,999 of policy); the policy section itself shrank to 1,423 when the technical contract moved into the queryable `whiteboard_api` manifest, while the declarations grew with the tool set. `scripts/face-budget.test.mjs` now pins the seven tool names and the safety rules rather than a character ceiling. The stable prefix stays cacheable, so the practical cost is below the literal size. |
 | **One timeline** | Drawing runs on the same agent and the same timeline as everything else. Asking for a drawing occupies the model for that turn; it does not happen in parallel with the task. |
 
 ## Board tools
@@ -130,7 +130,7 @@ Restart DeepSeek Harness to load it. For a Web profile, use `--profile web` and 
 
 ```sh
 pnpm install
-pnpm run check        # typecheck + build lib/ + emit types + verify artifacts & wire contract + model/budget tests
+pnpm run check        # typecheck + build lib/ + emit types + verify artifacts & wire contract + model-facing unit tests
 ```
 
 Isolated development and verification (does not touch your desktop profile):

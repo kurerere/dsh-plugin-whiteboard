@@ -1,6 +1,6 @@
 # dsh-plugin-whiteboard bundle layer.
-# One row mounts the Host face: the board store, the four board routes, and the
-# per-main-agent registration of the three board tools and the drawing policy.
+# One row mounts the Host face: the board store, the seven board routes, and the
+# per-main-agent registration of the seven board tools and the drawing policy.
 # Because the package declares `dsh.client`, the Web/Desktop client loads
 # ./client automatically.
 - insert:

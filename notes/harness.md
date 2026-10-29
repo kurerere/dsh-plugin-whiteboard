@@ -669,3 +669,39 @@ Screenshot: `.wbdev/shots/c-11-dryrun.png`; the JSON report lands under `phases.
 That makes eight phases. The six-phase macOS run recorded above predates `deep` and `dryrun`; both must
 be run once on the tagged build (and their PASS counts recorded here) before the slice's release gate can
 cite them. `--phase all` now includes them, so the next full run measures all eight.
+
+## 0.4.0 release (final bytes)
+
+P3/P4 (recorded in `design.md`) reached `main` after `0.3.0`; `0.4.0` names that feature set:
+`whiteboard_history` / `whiteboard_undo` and structured `checks`, the deep look requests
+(`debug: 'per-light'`, `angles: 'turntable'`, `diffAgainst`), `dryRun` previews on both draw tools, the
+per-session frame index, viewport reporting on the state poll, and a three-OS CI gate. The tool set went
+five → seven; the route table stayed at seven.
+
+Final build: `lib/index.js` 181,589 B sha `6db335b5aa0ddf40`, `lib/client.js` 570,359 B sha
+`0d0d7bf33fc0f6d9`, both version 0.4.0. Served bundle rev `676079868d1a` (570,437 B = file + 78).
+
+The bytes are the tested bytes. The e2e run below reported these two sha values from the tree it
+loaded, after `pnpm run check` rebuilt them from the committed sources; the tag commit adds
+documentation only. The version-bump commit `5811968` changed exactly the two banner lines and
+`package.json`.
+
+Gate at this tree: `pnpm run check` green — typecheck, both bundles, declaration emit, artifact/wire
+contract (7 routes, 7 tools), **103 tests (100 pass, 3 Windows-only skips, 0 failed)**. CI (`check`)
+green on ubuntu, macos and windows at `1f7744d` (run 40848805488); the tag commit is documentation-only
+and runs the same gate.
+
+Live evidence: `node scripts/e2e.mjs --phase all --timeout 240000` on the tagged build (isolated dev
+Host, throwaway `DSH_HOME=/tmp/wbdev2`), **110 PASS / 0 FAIL / 2 SKIP**, 9m06s, zero console errors,
+zero page errors, zero HTTP errors. Per phase: load 29, headline 13, say 6, regress 19, tools 4 (+1
+skip: the model spawned no subagent), look 5, deep 19, dryrun 15; load also carries its own skip when
+no v1 legacy session resolves to a parent with a board. Report:
+`/tmp/wbdev2/shots/e2e-c-all-2026-10-29T09-20-42-189Z.json`; screenshots
+`/tmp/wbdev2/shots/c-00-…`–`c-11-dryrun.png`; Host log
+`/tmp/wbdev2/logs/host-2026-10-29_09-20-28.log`.
+
+The run before the capture-status fix (`5811968`, index `3d1a60e2…`) was 109 PASS / 1 FAIL: the reload
+check counted one `410 (Gone)` on `whiteboard.capture.frame`, a late auto-frame answer that the client
+deliberately does not abandon. `1f7744d` makes that answer `200` with `accepted: false` — what a dropped
+frame actually is — so Chromium no longer logs an expected lost frame as a console error. The release
+run above has no console or HTTP errors at all.

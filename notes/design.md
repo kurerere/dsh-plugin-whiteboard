@@ -4,7 +4,7 @@ Target: DeepSeek Harness **0.2.1-rc.3** (Web/Desktop client). Plugin id `whitebo
 package `dsh-plugin-whiteboard`.
 
 The plugin puts an **AI drawing surface** in the right sidebar, and that surface belongs to the
-conversation rather than to a chat of its own: the three board tools are the **main agent's**
+conversation rather than to a chat of its own: the seven board tools are the **main agent's**
 tools, the board document is keyed by the **main Session**, and the sidebar tab is a view of
 that one board. So "draw how this works" works in the middle of a task, from the ordinary
 composer, with no second chat to keep in sync.
@@ -12,6 +12,7 @@ composer, with no second chat to keep in sync.
 ```
  user message ──► main agent (this conversation)
                      │  whiteboard_draw / whiteboard_3d / whiteboard_read
+                     │  (+ look / api / history / undo)
                      ▼
          Host board store ──► <dsh home>/storages/whiteboard/<mainSessionId>.json
                      │  GET /api/whiteboard.state?sessionId=  (rev-gated poll)
@@ -56,9 +57,10 @@ milliseconds is indistinguishable from a push.
 
 ## Where the board's model-facing face lives
 
-`tools` and `systemPrompt` are global registries, and the naive wiring — register the three
+`tools` and `systemPrompt` are global registries, and the naive wiring — register the seven
 board tools once, globally — taxes **every** agent in the process, including subagents, whose
-requests never draw anything. Since the tools are ~5 KB of schema per request, that tax is real
+requests never draw anything. Since the tools are ~10 KB of schema per request (10,212
+characters for the seven declarations), that tax is real
 and permanent. So the face is registered per agent, from `agent/created`, into `agent.ctx`:
 
 - **Timing.** `agent/created` is a serial creation listener: creation awaits its listeners before
@@ -79,9 +81,11 @@ and permanent. So the face is registered per agent, from `agent/created`, into `
 
 The prompt section is the other half: `agent.ctx.systemPrompt.section(...)`, ordered just after
 `PLAN_POLICY` through `getSectionOrder('PLAN_POLICY')` (falling back to a fixed order when the
-composition has no allocation table). Coordinate spaces, palette tokens, layering, id discipline
-and the "draw only when asked" rule live there **once**; the tool declarations point at the
-section instead of repeating it, because duplicated guidance is paid twice.
+composition has no allocation table). The section carries intent, the revise-by-id reminder and the
+two hard rules — draw only when asked, never treat the GUI as the board's view — once; the
+technical contract (coordinate spaces, palette tokens, layering, field lists) is generated into the
+queryable `whiteboard_api` manifest instead of being repeated in the prompt, because duplicated
+guidance is paid twice.
 
 ## Keying, and the one-time migration
 
@@ -460,3 +464,19 @@ memory-only `previous` / `revision` are tested against the real store in `script
 `scripts/e2e.mjs` gained `--phase deep` and `--phase dryrun` (prompts and PASS conditions in
 [notes/harness.md](harness.md)); they need the dev Host and the real model, and are run as part of the
 release gate rather than in `node --test`.
+
+**Released as 0.4.0.** P3 and P4 reached `main` after `0.3.0`, so `0.4.0` is the version that names
+them: `whiteboard_history` / `whiteboard_undo` and structured `checks`, the deep look requests
+(`debug: 'per-light'`, `angles: 'turntable'`, `diffAgainst`), `dryRun` previews on both draw tools, the
+per-session frame index, viewport reporting on the state poll, and a three-OS CI gate. The tool set went
+five → seven; the route table stayed at seven. Two late corrections shipped with it: a late or duplicate
+capture answer is now `200` with `accepted: false` instead of `410` (Chromium logs every non-2xx as a
+console error even though dropping the frame is the expected outcome), and the frame-store test's POSIX
+`0600` assertion only runs on POSIX, so the Windows CI leg measures the same product instead of failing
+on a mode Windows does not have. Final build: `lib/index.js` 181,589 B `6db335b5aa0ddf40`,
+`lib/client.js` 570,359 B `0d0d7bf33fc0f6d9`, both version 0.4.0. The version-bump commit changed
+exactly the two bundle banners and `package.json`; the commits after it change the capture answer's
+status code, the cross-platform test gate and documentation. Gate at this tree: `pnpm run check` green —
+typecheck, both bundles, declaration emit, artifact/wire contract (7 routes, 7 tools), **103 tests (100
+pass, 3 Windows-only skips, 0 failed)** — plus the eight-phase e2e run recorded in
+[notes/harness.md](harness.md) on this build.
