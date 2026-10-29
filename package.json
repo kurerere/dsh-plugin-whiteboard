@@ -1,7 +1,7 @@
 {
   "name": "dsh-plugin-whiteboard",
   "description": "DeepSeek Harness plugin: an AI whiteboard in the right sidebar that belongs to the current conversation — say what to draw and the model draws it on a live 2D canvas or a three.js scene, no second chat",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "type": "module",
   "license": "MIT",
   "repository": {
