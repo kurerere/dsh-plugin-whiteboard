@@ -13,18 +13,32 @@
  * - the single source of truth in `./spec.ts` — field/kind/view specs, limits,
  *   defaults, design scales, examples and hints.
  *
- * This module depends on `scene.ts` and `spec.ts` only. It deliberately does not
- * import `tools.ts` or `agent.ts`: the tool declarations and the prompt policy
- * will be migrated onto the spec, so the dependency has to run one way
- * (tool/prompt → manifest → spec), never back.
+ * This module depends on `scene.ts` and `spec.ts`, plus Node's `node:fs` for one
+ * thing only: {@link resolveBuildVersion} reads the `version` out of this
+ * package's `package.json` so the payload can report the build it is talking to.
+ * It deliberately does not import `tools.ts` or `agent.ts`: the tool declarations
+ * and the prompt policy will be migrated onto the spec, so the dependency has to
+ * run one way (tool/prompt → manifest → spec), never back.
  *
  * The payload is pure and JSON-serialisable: no paths, no environment variables,
  * no credentials. Fresh copies of the mutable defaults (camera, lights, shadow,
  * environment, field defaults) are returned so a caller cannot corrupt the spec
- * constants through the manifest.
+ * constants through the manifest. `buildManifest` itself stays pure — it never
+ * touches the filesystem; the caller passes `build` in.
  */
 import { type BoardState, type Camera3D, type Light3D, type Paint } from './scene.ts';
 import { EXAMPLES, LIMITS, type DesignSpec, type EnvironmentSettings, type FieldClient, type FieldType, type JsonValue, type ShadowSettings, type ToolInfo, type ToolRole } from './spec.ts';
+/**
+ * The build id this installation should report: the `version` from the
+ * `package.json` above this module, or {@link MANIFEST_DEFAULT_BUILD} (`dev`)
+ * when it cannot be resolved. Never throws.
+ *
+ * This is deliberately not applied inside {@link buildManifest}: that function
+ * stays pure, so callers that know their build (the Host, tests) pass `build`
+ * explicitly and an empty context still yields the documented `dev` default.
+ * @returns the installed package version, or `dev`.
+ */
+export declare function resolveBuildVersion(): string;
 /** Stage size the panel reported, in CSS pixels. */
 export interface ManifestViewport {
     /** Stage width in CSS pixels. */
@@ -50,7 +64,7 @@ export interface ManifestContext {
     contrast?: Record<string, number>;
     /** Current board document; omitted means an empty board. */
     board?: BoardState;
-    /** Build identifier (version plus commit, or similar); defaults to `dev`. */
+    /** Build identifier; the Host passes `resolveBuildVersion()`. Defaults to `dev`. */
     build?: string;
 }
 /** The two coordinate spaces of the board. */
@@ -277,7 +291,7 @@ export interface ManifestOps {
 export interface WhiteboardManifest {
     /** Version of this payload shape. */
     apiVersion: string;
-    /** Build the Host is running (`dev` when the caller cannot supply one). */
+    /** Build the Host is running — the package version, or `dev` when unknown. */
     build: string;
     /** The board tools and what each is for. */
     tools: Readonly<Record<ToolRole, ToolInfo>>;
@@ -303,10 +317,15 @@ export interface WhiteboardManifest {
  *
  * Pure: it reads the context, never the filesystem, the environment or the
  * clock, and every mutable part it returns (defaults, examples, hints, tools,
- * surfaces, limits) is a fresh copy.
+ * surfaces, limits) is a fresh copy. `build` falls back to `dev`; pass
+ * `{ build: resolveBuildVersion() }` to report the installed package version.
  * @param context - request context (theme, viewport, palette, board, build).
  * @returns the complete, JSON-serialisable contract.
  */
 export declare function buildManifest(context?: ManifestContext): WhiteboardManifest;
-/** The contract default build id, exported for callers that forward it. */
+/**
+ * The build id reported when the caller cannot resolve one (`dev`); exported for
+ * callers that forward it. This is also the fallback inside
+ * {@link resolveBuildVersion}, so the two never disagree.
+ */
 export declare const MANIFEST_DEFAULT_BUILD = "dev";

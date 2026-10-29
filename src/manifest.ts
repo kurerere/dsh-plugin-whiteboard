@@ -13,17 +13,21 @@
  * - the single source of truth in `./spec.ts` — field/kind/view specs, limits,
  *   defaults, design scales, examples and hints.
  *
- * This module depends on `scene.ts` and `spec.ts` only. It deliberately does not
- * import `tools.ts` or `agent.ts`: the tool declarations and the prompt policy
- * will be migrated onto the spec, so the dependency has to run one way
- * (tool/prompt → manifest → spec), never back.
+ * This module depends on `scene.ts` and `spec.ts`, plus Node's `node:fs` for one
+ * thing only: {@link resolveBuildVersion} reads the `version` out of this
+ * package's `package.json` so the payload can report the build it is talking to.
+ * It deliberately does not import `tools.ts` or `agent.ts`: the tool declarations
+ * and the prompt policy will be migrated onto the spec, so the dependency has to
+ * run one way (tool/prompt → manifest → spec), never back.
  *
  * The payload is pure and JSON-serialisable: no paths, no environment variables,
  * no credentials. Fresh copies of the mutable defaults (camera, lights, shadow,
  * environment, field defaults) are returned so a caller cannot corrupt the spec
- * constants through the manifest.
+ * constants through the manifest. `buildManifest` itself stays pure — it never
+ * touches the filesystem; the caller passes `build` in.
  */
 
+import { readFileSync } from 'node:fs'
 import {
   BOARD_EXTENT,
   DEFAULT_CAMERA,
@@ -72,6 +76,50 @@ import {
 /** Build id used when the caller cannot supply one. */
 const DEFAULT_BUILD = 'dev'
 
+/**
+ * Cached answer of {@link resolveBuildVersion}, so the Host reads its own
+ * `package.json` at most once per process. A failed read caches the fallback too:
+ * the installed version cannot change under a running process.
+ */
+let cachedBuildVersion: string | undefined
+
+/**
+ * Read the `version` field out of the `package.json` this module ships next to.
+ *
+ * Both places this module runs from sit one directory below the package root —
+ * `src/manifest.ts` under `node --test` and the bundled `lib/index.js` in the
+ * Host — so the same `../package.json` URL resolves in both. Wrapped in
+ * `try`/`catch` because a test double, a concatenated bundle or a stripped
+ * install may not have the file: a build id is never worth throwing over.
+ * @returns the version string, or `undefined` when it cannot be read.
+ */
+function readPackageVersion(): string | undefined {
+  try {
+    const text = readFileSync(new URL('../package.json', import.meta.url), 'utf8')
+    const parsed: unknown = JSON.parse(text)
+    if (typeof parsed !== 'object' || parsed === null) return undefined
+    const version = (parsed as { version?: unknown }).version
+    return typeof version === 'string' && version.trim() !== '' ? version.trim() : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The build id this installation should report: the `version` from the
+ * `package.json` above this module, or {@link MANIFEST_DEFAULT_BUILD} (`dev`)
+ * when it cannot be resolved. Never throws.
+ *
+ * This is deliberately not applied inside {@link buildManifest}: that function
+ * stays pure, so callers that know their build (the Host, tests) pass `build`
+ * explicitly and an empty context still yields the documented `dev` default.
+ * @returns the installed package version, or `dev`.
+ */
+export function resolveBuildVersion(): string {
+  if (cachedBuildVersion === undefined) cachedBuildVersion = readPackageVersion() ?? DEFAULT_BUILD
+  return cachedBuildVersion
+}
+
 /** Stage size the panel reported, in CSS pixels. */
 export interface ManifestViewport {
   /** Stage width in CSS pixels. */
@@ -98,7 +146,7 @@ export interface ManifestContext {
   contrast?: Record<string, number>
   /** Current board document; omitted means an empty board. */
   board?: BoardState
-  /** Build identifier (version plus commit, or similar); defaults to `dev`. */
+  /** Build identifier; the Host passes `resolveBuildVersion()`. Defaults to `dev`. */
   build?: string
 }
 
@@ -325,7 +373,7 @@ export interface ManifestOps {
 export interface WhiteboardManifest {
   /** Version of this payload shape. */
   apiVersion: string
-  /** Build the Host is running (`dev` when the caller cannot supply one). */
+  /** Build the Host is running — the package version, or `dev` when unknown. */
   build: string
   /** The board tools and what each is for. */
   tools: Readonly<Record<ToolRole, ToolInfo>>
@@ -566,7 +614,8 @@ function cloneExamples(): Readonly<Record<ExampleRole, ToolCallExample>> {
  *
  * Pure: it reads the context, never the filesystem, the environment or the
  * clock, and every mutable part it returns (defaults, examples, hints, tools,
- * surfaces, limits) is a fresh copy.
+ * surfaces, limits) is a fresh copy. `build` falls back to `dev`; pass
+ * `{ build: resolveBuildVersion() }` to report the installed package version.
  * @param context - request context (theme, viewport, palette, board, build).
  * @returns the complete, JSON-serialisable contract.
  */
@@ -629,6 +678,10 @@ export function buildManifest(context: ManifestContext = {}): WhiteboardManifest
   }
 }
 
-/** The contract default build id, exported for callers that forward it. */
+/**
+ * The build id reported when the caller cannot resolve one (`dev`); exported for
+ * callers that forward it. This is also the fallback inside
+ * {@link resolveBuildVersion}, so the two never disagree.
+ */
 export const MANIFEST_DEFAULT_BUILD = DEFAULT_BUILD
 

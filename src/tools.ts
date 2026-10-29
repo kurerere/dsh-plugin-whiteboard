@@ -38,7 +38,7 @@ import {
 } from './shared.ts'
 import type { BoardSnapshot, BoardStore } from './board-store.ts'
 import type { AttachedImage, CaptureService, FrameStore, SavedFrame } from './capture.ts'
-import { buildManifest } from './manifest.ts'
+import { buildManifest, resolveBuildVersion } from './manifest.ts'
 
 /** Upper bound on operations one call may carry. */
 const MAX_BATCH = 64
@@ -2055,6 +2055,9 @@ export function createBoardTools(
         ...(theme === undefined ? {} : { theme }),
         ...(viewport === undefined ? {} : { viewport }),
         board: snapshot.board,
+        // The installed package version, so a model can tell two builds apart.
+        // Cached after the first call; falls back to `dev` when it cannot be read.
+        build: resolveBuildVersion(),
       })
       const section = args.section ?? 'all'
       if (section === 'all') return JSON.stringify(manifest)

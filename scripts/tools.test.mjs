@@ -1,13 +1,17 @@
 // Host integration tests for the model-facing board tools: the full `read`
 // report, the `look` image result — including the deep modes (per-light,
-// turntable, diffAgainst) — the dry-run path that never commits, and the
-// diagnostics that make a wrong shadow visible without a browser. The capture
-// broker itself is tested in capture.test.mjs; this file proves the tool layer
-// wires it into the result the model receives.
+// turntable, diffAgainst) — the dry-run path that never commits, the build id
+// `whiteboard_api` reports, and the diagnostics that make a wrong shadow visible
+// without a browser. The capture broker itself is tested in capture.test.mjs;
+// this file proves the tool layer wires it into the result the model receives.
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { createBoardTools } from '../src/tools.ts'
 import { CaptureUnavailableError, createCaptureService } from '../src/capture.ts'
+
+/** The version this checkout builds; `whiteboard_api.build` must report it. */
+const packageVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version
 
 /** One 3D board: a transparent sphere, a hand-made shadow, one casting light. */
 const board = {
@@ -782,6 +786,24 @@ test('whiteboard_api can return one section of the contract', async () => {
   assert.ok(parsed.current)
   assert.equal(parsed.ops, undefined)
   assert.equal(parsed.tools, undefined)
+})
+
+test('whiteboard_api reports the installed package version, not a bare dev', async () => {
+  const { tool } = buildTools()
+  const parsed = JSON.parse(await tool('whiteboard_api').execute({}, exec))
+  // The defect this covers: the Host answered `build: "dev"` forever, so a model
+  // could not tell 0.4.0 from a working tree. The package version is the build.
+  assert.equal(parsed.build, packageVersion)
+  assert.notEqual(parsed.build, 'dev')
+  assert.match(parsed.build, /^\d+\.\d+\.\d+/)
+})
+
+test('whiteboard_api carries the build id in a single-section response too', async () => {
+  const { tool } = buildTools()
+  const parsed = JSON.parse(await tool('whiteboard_api').execute({ section: 'hints' }, exec))
+  assert.equal(parsed.build, packageVersion)
+  assert.ok(Array.isArray(parsed.hints))
+  assert.equal(parsed.ops, undefined)
 })
 
 test('whiteboard_api reports the polled viewport before a frame is captured', async () => {
