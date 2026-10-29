@@ -238,8 +238,13 @@ test('the index is an atomic newest-first JSON array with no temp leftovers', as
     }
     const leftovers = (await filesIn(directory)).filter(name => name.includes('.tmp'))
     assert.deepEqual(leftovers, [], 'the atomic write leaves no temporary files behind')
-    const info = await stat(join(directory, 'index.json'))
-    assert.equal(info.mode & 0o777, 0o600, 'the index stays private to the user')
+    // Windows has no POSIX permission bits: every regular file reports 0o666, so
+    // the mode is only evidence of privacy on a POSIX host. The atomic-write and
+    // no-leftovers assertions above still run everywhere.
+    if (process.platform !== 'win32') {
+      const info = await stat(join(directory, 'index.json'))
+      assert.equal(info.mode & 0o777, 0o600, 'the index stays private to the user')
+    }
   })
 })
 
