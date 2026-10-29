@@ -68,6 +68,17 @@ export interface BoardStore {
      */
     canUndo(sessionId: string): boolean;
     /**
+     * Snapshot of the undo stack, newest last. Memory only: a Host restart clears
+     * it. Each entry names the revision that an undo would restore and what kind
+     * of mutation it takes back.
+     * @param sessionId - whiteboard Session id (the board key).
+     * @returns the retained steps, oldest first; empty when nothing can be undone.
+     */
+    history(sessionId: string): {
+        rev: number;
+        kind: UndoKind;
+    }[];
+    /**
      * Make sure a board document exists, creating an empty one when absent.
      * An existing document is never overwritten. Resets that board's undo history:
      * a replaced board is not the same board.

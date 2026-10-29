@@ -202,6 +202,8 @@ export declare const TOOL_NAMES: {
     readonly read: "whiteboard_read";
     readonly look: "whiteboard_look";
     readonly api: "whiteboard_api";
+    readonly history: "whiteboard_history";
+    readonly undo: "whiteboard_undo";
 };
 /** One role of a board tool. */
 export type ToolRole = keyof typeof TOOL_NAMES;

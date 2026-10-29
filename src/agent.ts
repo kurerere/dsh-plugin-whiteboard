@@ -77,7 +77,8 @@ const BOARD_POLICY = [
   'it is token-fenced and is not your view. whiteboard_read returns the full state without the picture.',
   '',
   'CLEAR AND UNDO',
-  'Clearing and undoing belong to the user unless they ask. Read after external changes.',
+  'Clearing and undoing belong to the user unless they ask; whiteboard_history / whiteboard_undo exist for when',
+  'they do. Read after external changes.',
   '',
   'After drawing, say in one or two sentences what the user is looking at and what you can change next.',
 ].join('\n')

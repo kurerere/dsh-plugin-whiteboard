@@ -56,7 +56,11 @@ export declare const READ_TOOL = "whiteboard_read";
 export declare const LOOK_TOOL = "whiteboard_look";
 /** Model-facing tool that returns the live, self-describing board contract. */
 export declare const API_TOOL = "whiteboard_api";
-/** Tool names owned by this plugin (all five belong to the main agent). */
+/** Model-facing tool that reports the undo stack (memory only). */
+export declare const HISTORY_TOOL = "whiteboard_history";
+/** Model-facing tool that steps the board back when the user asks. */
+export declare const UNDO_TOOL = "whiteboard_undo";
+/** Tool names owned by this plugin (all seven belong to the main agent). */
 export declare const BOARD_TOOLS: readonly string[];
 /**
  * `GET ?sessionId=<id>` → {@link CapturePollAnswer} or 204: the open panel asks

@@ -529,6 +529,8 @@ function cloneTools(): Record<ToolRole, ToolInfo> {
     read: { ...TOOL_SPECS.read },
     look: { ...TOOL_SPECS.look },
     api: { ...TOOL_SPECS.api },
+    history: { ...TOOL_SPECS.history },
+    undo: { ...TOOL_SPECS.undo },
   }
 }
 

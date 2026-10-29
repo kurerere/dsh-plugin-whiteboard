@@ -74,8 +74,10 @@ Two fixed costs, stated plainly:
 | `whiteboard_draw` | append 2D ops (`add` / `update` / `remove` / `clear`) |
 | `whiteboard_3d` | append 3D object ops plus an optional view (camera, lights, shadows, background, grid, auto-rotate) |
 | `whiteboard_read` | full state: every shape/object with geometry and materials, the camera, lights, viewport and diagnostics |
-| `whiteboard_look` | capture what the open 画板 panel shows as an image plus measurements/warnings; `overlay: 'ids'` labels elements, `debug: 'shadow-only'` isolates the shadow pass |
-| `whiteboard_api` | the live contract: tool/field spec, defaults, palette, current camera and lights, viewport, limits, examples |
+| `whiteboard_look` | capture what the open 画板 panel shows as an image plus measurements, warnings and structured checks; `overlay: 'ids'` labels elements, `debug: 'shadow-only'` isolates the shadow pass |
+| `whiteboard_api` | the live contract: tool/field spec, defaults, palette, current camera and lights, viewport, limits, examples; `section` fetches one part |
+| `whiteboard_history` | report the memory-only undo stack: current revision and the steps an undo would restore |
+| `whiteboard_undo` | step the board back one or more mutations; use only when the user asks |
 
 The model sees the board only through `whiteboard_look`: a frame exists only while the 画板 tab is on
 screen. Every mutation also asks for a small frame when the panel is open, and `whiteboard_read` still

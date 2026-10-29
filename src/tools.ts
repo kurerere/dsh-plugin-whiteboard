@@ -32,7 +32,7 @@ import {
   type Scene3DEvent, type Shape2D, type ShapePatch, type ShapeStyle, type TextShape, type Vec2, type Vec3,
   type View3DPatch,
 } from './scene.ts'
-import { DRAW_TOOL, API_TOOL, LOOK_TOOL, READ_TOOL, SCENE_TOOL, type CaptureOptions } from './shared.ts'
+import { DRAW_TOOL, API_TOOL, HISTORY_TOOL, LOOK_TOOL, READ_TOOL, SCENE_TOOL, UNDO_TOOL, type CaptureOptions } from './shared.ts'
 import type { BoardStore } from './board-store.ts'
 import type { AttachedImage, CaptureService, FrameStore, SavedFrame } from './capture.ts'
 import { buildManifest } from './manifest.ts'
@@ -639,8 +639,25 @@ function castsShadow(light: Light3D, index: number, lights: readonly Light3D[]):
  * @param board - current board.
  * @returns one line per finding, empty when nothing looks off.
  */
-function diagnose(board: BoardState): string[] {
-  const warnings: string[] = []
+/** One declarative board check, mirrored in `whiteboard_look` / `whiteboard_read`. */
+interface BoardCheck {
+  /** Stable id the model can refer to. */
+  id: string
+  /** Whether the board satisfies the check. */
+  pass: boolean
+  /** Human-readable evidence, useful in both states. */
+  detail: string
+}
+
+/**
+ * The objective checks a model (or a test) can rely on without decoding pixels.
+ * They are deliberately conservative: a `pass` means the file does not show the
+ * problem, not that the picture is beautiful.
+ * @param board - current board.
+ * @returns one result per check, in a stable order.
+ */
+function boardChecks(board: BoardState): BoardCheck[] {
+  const checks: BoardCheck[] = []
   const outside: string[] = []
   for (const shape of board.canvas.shapes) {
     const bounds = shapeBounds(shape)
@@ -648,36 +665,73 @@ function diagnose(board: BoardState): string[] {
     if (bounds.x1 < -0.5 || bounds.y1 < -0.5
       || bounds.x2 > BOARD_EXTENT + 0.5 || bounds.y2 > BOARD_EXTENT + 0.5) outside.push(shape.id)
   }
-  if (outside.length > 0) {
-    warnings.push(`${outside.length} 2D shape(s) extend outside the 0..${BOARD_EXTENT} square: `
-      + `${outside.slice(0, 8).join(', ')}${outside.length > 8 ? ', …' : ''}.`)
-  }
+  checks.push({
+    id: 'bounds.2d',
+    pass: outside.length === 0,
+    detail: outside.length === 0
+      ? `All 2D shapes are inside the 0..${BOARD_EXTENT} square.`
+      : `${outside.length} 2D shape(s) extend outside the 0..${BOARD_EXTENT} square: `
+        + `${outside.slice(0, 8).join(', ')}${outside.length > 8 ? ', …' : ''}.`,
+  })
+
   const scene = board.scene
-  if (scene.objects.length === 0) return warnings
   const casters = scene.lights
     .map((light, index) => ({ light, index }))
     .filter(({ light, index }) => castsShadow(light, index, scene.lights))
-  if (casters.length > 1) {
-    warnings.push(`${casters.length} lights cast shadows (${casters.map(({ index }) => `light #${index + 1}`).join(', ')}); `
-      + 'a single caster gives one readable shadow.')
-  }
-  if (casters.length === 0) warnings.push('No light casts a shadow; 3D objects may look like they float.')
+  const casterNames = casters.map(({ index }) => `light #${index + 1}`).join(', ')
+  checks.push({
+    id: 'shadow.present',
+    pass: casters.length > 0,
+    detail: casters.length > 0
+      ? `${casters.length} light(s) cast shadows.`
+      : 'No light casts a shadow; 3D objects may look like they float.',
+  })
+  checks.push({
+    id: 'shadow.single',
+    pass: casters.length <= 1,
+    detail: casters.length <= 1
+      ? 'At most one light casts a shadow.'
+      : `${casters.length} lights cast shadows (${casterNames}); a single caster gives one readable shadow.`,
+  })
+
   const transparentCasters = scene.objects
     .filter(object => object.castShadow === true && (object.opacity ?? 1) < 0.99)
     .map(object => object.id)
-  if (transparentCasters.length > 0) {
-    warnings.push(`Transparent object(s) explicitly cast a solid shadow: ${transparentCasters.join(', ')}.`)
-  }
+  checks.push({
+    id: 'shadow.opaque',
+    pass: transparentCasters.length === 0,
+    detail: transparentCasters.length === 0
+      ? 'No transparent object is forced to cast a solid shadow.'
+      : `Transparent object(s) explicitly cast a solid shadow: ${transparentCasters.join(', ')}.`,
+  })
+
+  const belowGround = scene.objects.filter(object => objectBounds(object).min[1] < -0.05).map(object => object.id)
+  checks.push({
+    id: 'ground.objects',
+    pass: belowGround.length === 0,
+    detail: belowGround.length === 0
+      ? 'All objects are on or above the ground plane.'
+      : `Object(s) below the ground plane: ${belowGround.join(', ')}.`,
+  })
+
   const fakeShadows = scene.objects
     .filter(object => /contact|shadow/i.test(object.id) && (object.opacity ?? 1) >= 0.99)
     .map(object => object.id)
-  if (fakeShadows.length > 0) {
-    warnings.push(`Opaque object(s) look like hand-made shadows (${fakeShadows.join(', ')}); `
-      + 'they are geometry, not light, and will not follow the light.')
-  }
-  const belowGround = scene.objects.filter(object => objectBounds(object).min[1] < -0.05).map(object => object.id)
-  if (belowGround.length > 0) warnings.push(`Object(s) below the ground plane: ${belowGround.join(', ')}.`)
-  return warnings
+  checks.push({
+    id: 'shadow.fake',
+    pass: fakeShadows.length === 0,
+    detail: fakeShadows.length === 0
+      ? 'No opaque object looks like a hand-made shadow.'
+      : `Opaque object(s) look like hand-made shadows (${fakeShadows.join(', ')}); `
+        + 'they are geometry, not light, and will not follow the light.',
+  })
+
+  return checks
+}
+
+/** Failed check details, in check order, for the warning/diagnostic lists. */
+function warningsOf(checks: readonly BoardCheck[]): string[] {
+  return checks.filter(check => !check.pass).map(check => check.detail)
 }
 
 /**
@@ -740,6 +794,19 @@ const LOOK_OUTPUT = {
     },
     summary: { type: 'string', required: true },
     warnings: { type: 'array', items: { type: 'string' }, required: true },
+    checks: {
+      type: 'array',
+      required: true,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', required: true },
+          pass: { type: 'boolean', required: true },
+          detail: { type: 'string', required: true },
+        },
+      },
+    },
     details: { type: 'string', required: true },
   },
 } as const
@@ -759,21 +826,53 @@ interface LookResult {
   image?: AttachedImage
   summary: string
   warnings: string[]
+  checks: BoardCheck[]
   details: string
 }
 
 /** Render one look as text plus the image itself when an attachment exists. */
 function lookRender(_args: unknown, value: Readonly<LookResult>): ContentBlock[] {
+  const passed = value.checks.filter(check => check.pass).length
+  const checkText = value.checks.length === 0 ? '' : `\nChecks: ${passed}/${value.checks.length} passed.`
   const warningText = value.warnings.length === 0 ? '' : `\nWarnings:\n- ${value.warnings.join('\n- ')}`
   const imageHint = value.image === undefined
     ? `\nPNG: ${value.frame.path} — open it with read_image.`
     : ''
   const blocks: ContentBlock[] = [{
     type: 'text',
-    text: `${value.summary}${warningText}${imageHint}\n${value.details}`,
+    text: `${value.summary}${checkText}${warningText}${imageHint}\n${value.details}`,
   }]
   if (value.image !== undefined) blocks.push({ type: 'image', attachment: value.image })
   return blocks
+}
+
+/** Output declaration of one model-side undo. */
+const UNDO_OUTPUT = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    reverted: { type: 'array', items: { type: 'string' }, required: true },
+    rev: { type: 'integer', required: true },
+    canUndo: { type: 'boolean', required: true },
+    steps: { type: 'integer', required: true },
+  },
+} as const
+
+/** One model-side undo result. */
+interface UndoResult {
+  reverted: string[]
+  rev: number
+  canUndo: boolean
+  steps: number
+}
+
+/** Render one model-side undo as a single line. */
+function undoRender(_args: unknown, value: Readonly<UndoResult>): { type: 'text'; text: string }[] {
+  const text = value.steps === 0
+    ? `${UNDO_TOOL}: nothing to undo (rev ${value.rev}${value.canUndo ? '' : ', history empty'}).`
+    : `${UNDO_TOOL}: stepped back ${value.steps} (${value.reverted.join(', ')}); `
+      + `rev ${value.rev}; canUndo ${value.canUndo}.`
+  return [{ type: 'text', text }]
 }
 
 /** Build one canonical 3D object from a flat `add` op. */
@@ -1334,6 +1433,7 @@ export function createBoardTools(
       const snapshot = store.read(sessionId)
       const board = snapshot.board
       const viewport = services?.captures.lastViewport(sessionId) ?? null
+      const checks = boardChecks(board)
       const report = {
         mode: board.mode,
         rev: board.rev,
@@ -1355,7 +1455,8 @@ export function createBoardTools(
           })),
           objects: board.scene.objects.map(object => ({ ...object, bounds: objectBounds(object) })),
         },
-        diagnostics: diagnose(board),
+        checks,
+        diagnostics: warningsOf(checks),
       }
       return [
         describeBoard(board),
@@ -1411,7 +1512,8 @@ export function createBoardTools(
       const answer = await services.captures.request(sessionId, options, 4_000)
       const saved = await services.frames.save(sessionId, answer.png)
       const image = await services.attachImage(saved, `whiteboard-${saved.hash}.png`)
-      const warnings = diagnose(snapshot.board)
+      const checks = boardChecks(snapshot.board)
+      const warnings = warningsOf(checks)
       const details = JSON.stringify({
         rev: snapshot.rev,
         mode: answer.mode,
@@ -1419,6 +1521,7 @@ export function createBoardTools(
         height: answer.height,
         camera: answer.camera ?? null,
         viewport: answer.viewport ?? null,
+        checks,
       }, null, 2)
       const summary = `${LOOK_TOOL}: captured the ${answer.mode.toUpperCase()} panel at `
         + `${answer.width}×${answer.height}px (board rev ${snapshot.rev}); `
@@ -1436,6 +1539,7 @@ export function createBoardTools(
         },
         summary,
         warnings,
+        checks,
         details,
         ...(image === undefined ? {} : { image }),
       }
@@ -1448,13 +1552,20 @@ export function createBoardTools(
     description:
       'Read the live board contract for this conversation: tool list, op/field spec, defaults, palette, '
       + 'current camera and lights, viewport, limits, examples and hints. Call it before authoring; every '
-      + 'value can change between builds, themes and conversations, so do not assume values from another one.',
-    parameters: {},
+      + 'value can change between builds, themes and conversations, so do not assume values from another one. '
+      + 'Pass `section` to fetch one part when the whole contract would be too much.',
+    parameters: {
+      section: {
+        type: 'string',
+        enum: ['all', 'tools', 'surfaces', 'current', 'defaults', 'design', 'ops', 'limits', 'examples', 'hints'],
+        description: 'One part of the contract; all (default) returns everything.',
+      },
+    },
     output: {
       schema: { type: 'string' },
       render: (_args, value) => [{ type: 'text', text: value }],
     },
-    execute: async (_args, exec) => {
+    execute: async (args, exec) => {
       await ready
       const sessionId = boardIdFor(API_TOOL, exec)
       const snapshot = store.read(sessionId)
@@ -1465,11 +1576,78 @@ export function createBoardTools(
         ...(viewport === undefined ? {} : { viewport }),
         board: snapshot.board,
       })
-      // Compact, not pretty: the manifest is already structured JSON and the
-      // pretty form costs roughly twice the context for the same facts.
-      return JSON.stringify(manifest)
+      const section = args.section ?? 'all'
+      if (section === 'all') return JSON.stringify(manifest)
+      const pieces = {
+        tools: manifest.tools,
+        surfaces: manifest.surfaces,
+        current: manifest.current,
+        defaults: manifest.defaults,
+        design: manifest.design,
+        ops: manifest.ops,
+        limits: manifest.limits,
+        examples: manifest.examples,
+        hints: manifest.hints,
+      } as const
+      return JSON.stringify({
+        apiVersion: manifest.apiVersion,
+        build: manifest.build,
+        [section]: pieces[section],
+      })
     },
   })
 
-  return [draw, scene, read, look, api]
+  const history = defineTool({
+    name: HISTORY_TOOL,
+    description:
+      'Report the memory-only undo stack for this board: current revision, whether an undo exists, and the '
+      + 'revisions an undo would restore. It resets when the Host restarts.',
+    parameters: {},
+    output: {
+      schema: { type: 'string' },
+      render: (_args, value) => [{ type: 'text', text: value }],
+    },
+    execute: async (_args, exec) => {
+      await ready
+      const sessionId = boardIdFor(HISTORY_TOOL, exec)
+      const snapshot = store.read(sessionId)
+      return JSON.stringify({
+        rev: snapshot.rev,
+        canUndo: store.canUndo(sessionId),
+        history: store.history(sessionId),
+      }, null, 2)
+    },
+  })
+
+  const undo = defineTool({
+    name: UNDO_TOOL,
+    description:
+      'Step the board back one or more mutations (draw or clear). Use it only when the user asks to undo; '
+      + 'Ctrl+Z is theirs, and clearing is the only destructive action otherwise.',
+    parameters: {
+      steps: { type: 'integer', description: 'How many mutations to step back, 1..8 (default 1).' },
+    },
+    output: { schema: UNDO_OUTPUT, render: undoRender },
+    execute: async (args, exec) => {
+      await ready
+      const sessionId = boardIdFor(UNDO_TOOL, exec)
+      const steps = Math.max(1, Math.min(8, args.steps ?? 1))
+      const reverted: string[] = []
+      for (let i = 0; i < steps; i += 1) {
+        const outcome = await store.undo(sessionId)
+        if (outcome === undefined) break
+        reverted.push(outcome.reverted)
+      }
+      const snapshot = store.read(sessionId)
+      const result: UndoResult = {
+        reverted,
+        rev: snapshot.rev,
+        canUndo: store.canUndo(sessionId),
+        steps: reverted.length,
+      }
+      return result
+    },
+  })
+
+  return [draw, scene, read, look, api, history, undo]
 }

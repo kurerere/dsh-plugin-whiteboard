@@ -286,6 +286,8 @@ export const TOOL_NAMES = {
   read: 'whiteboard_read',
   look: 'whiteboard_look',
   api: 'whiteboard_api',
+  history: 'whiteboard_history',
+  undo: 'whiteboard_undo',
 } as const
 
 /** One role of a board tool. */
@@ -320,6 +322,14 @@ export const TOOL_SPECS: Readonly<Record<ToolRole, ToolInfo>> = {
   api: {
     name: TOOL_NAMES.api,
     purpose: 'Read this contract: build, theme, viewport, live board state, field specs, limits, examples and hints.',
+  },
+  history: {
+    name: TOOL_NAMES.history,
+    purpose: 'Report the memory-only undo stack: the current revision and the steps an undo would restore.',
+  },
+  undo: {
+    name: TOOL_NAMES.undo,
+    purpose: 'Step the board back one mutation; use only when the user asks, because Ctrl+Z is theirs.',
   },
 }
 

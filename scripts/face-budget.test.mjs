@@ -20,10 +20,13 @@ const store = {
 
 const definitions = createBoardTools(store, Promise.resolve())
 
-test('the five board tools are the whole model-facing surface', () => {
+test('the seven board tools are the whole model-facing surface', () => {
   assert.deepEqual(
     definitions.map(definition => definition.name),
-    ['whiteboard_draw', 'whiteboard_3d', 'whiteboard_read', 'whiteboard_look', 'whiteboard_api'],
+    [
+      'whiteboard_draw', 'whiteboard_3d', 'whiteboard_read', 'whiteboard_look',
+      'whiteboard_api', 'whiteboard_history', 'whiteboard_undo',
+    ],
   )
 })
 

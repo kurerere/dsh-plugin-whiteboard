@@ -1531,13 +1531,31 @@ async function phaseRegress() {
 async function phaseTools() {
   await openApp()
   await ensureSidebar()
-  const sid = await mainSessionId()
+  const warm = await newSession()
+  const warmSid = warm.created ? warm.after : ((await mainSessionId()) ?? warm.before)
+  if (warmSid === null) throw new Error('no main session for the tools phase')
+  // Force one request on a fresh conversation so the schema dump below describes
+  // the build the Host is running now, not whatever header an older session
+  // carried before a restart. Keep the probe in a second conversation, so the
+  // warm-up's answer cannot shape what the model makes of the subagent task.
+  const turnsBefore = countTypes(sessionRecords(warmSid))
+  await sendFromMainComposer('只回复 OK，不要调用任何工具。')
+  await waitFor(() => {
+    const counts = countTypes(sessionRecords(warmSid))
+    return (counts['turn/start'] ?? 0) > (turnsBefore['turn/start'] ?? 0) ? counts : null
+  }, 60_000, 500)
+  await waitForIdle(warmSid, Math.min(opts.timeoutMs, 120_000))
+  await newSession()
+  const sid = (await mainSessionId()) ?? warmSid
 
   // **Authoritative host-side schema dump.** Every model request is recorded as a
   // `request/header` record whose `data.header.tools[]` is exactly the tool list
   // the agent was offered, so tool visibility can be asserted without asking the
   // model anything.
-  const BOARD_TOOLS = new Set(['whiteboard_draw', 'whiteboard_3d', 'whiteboard_read', 'whiteboard_look', 'whiteboard_api'])
+  const BOARD_TOOLS = new Set([
+    'whiteboard_draw', 'whiteboard_3d', 'whiteboard_read', 'whiteboard_look',
+    'whiteboard_api', 'whiteboard_history', 'whiteboard_undo',
+  ])
   const dump = listSessions().map(({ id }) => {
     const records = sessionRecords(id)
     const head = records[0] ?? {}
@@ -1562,7 +1580,7 @@ async function phaseTools() {
 
   const currentMain = dump.filter((s) => !s.legacy && s.origin !== 'subagent' && s.board.length === BOARD_TOOLS.size)
   check(
-    'main agent tool schema includes all five board tools',
+    'main agent tool schema includes all seven board tools',
     currentMain.length > 0,
     currentMain.length
       ? `${currentMain.length} main session(s) with ${currentMain[0].toolCount} tools incl. ${currentMain[0].board.join(', ')}`
@@ -1587,17 +1605,17 @@ async function phaseTools() {
   const prompts = [
     [
       '用 subagent 工具创建一个子代理，任务原话是：',
-      '"检查你自己的工具列表里有没有 whiteboard_draw、whiteboard_3d、whiteboard_read、whiteboard_look、whiteboard_api 这五个工具。',
+      '"检查你自己的工具列表里有没有 whiteboard_draw、whiteboard_3d、whiteboard_read、whiteboard_look、whiteboard_api、whiteboard_history、whiteboard_undo 这七个工具。',
       '如果有，就调用 whiteboard_draw（ops 传空数组）并把结果贴出来；',
       '如果没有，只回复 NO_WHITEBOARD_TOOLS。"',
       '然后把子代理的最终回复原样贴给我，不要改写。',
-    ].join('\n'),
+    ].join(' '),
     [
       '必须真的调用 subagent 工具（工具列表里名为 subagent 的那个）创建子代理，不要自己回答这个问题。',
-      '子代理任务原话："检查你的工具列表里有没有 whiteboard_draw / whiteboard_3d / whiteboard_read / whiteboard_look / whiteboard_api；',
+      '子代理任务原话："检查你的工具列表里有没有 whiteboard_draw / whiteboard_3d / whiteboard_read / whiteboard_look / whiteboard_api / whiteboard_history / whiteboard_undo；',
       '有就调用 whiteboard_draw（ops 传空数组），没有就只回复 NO_WHITEBOARD_TOOLS。"',
       '把子代理最终回复原样贴回来。',
-    ].join('\n'),
+    ].join(' '),
   ]
   let replied = { ok: false, value: null, elapsedMs: 0 }
   const probeWait = Math.min(opts.timeoutMs, 90_000)

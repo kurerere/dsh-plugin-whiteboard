@@ -64,8 +64,10 @@ three.js，并在回答还在进行时一笔一笔地出现。
 | `whiteboard_draw` | 向 2D 画布追加一批操作：`add` / `update` / `remove` / `clear` |
 | `whiteboard_3d` | 向 3D 场景追加一批对象操作，以及可选的视图（相机、灯光、阴影、背景、网格、自动旋转） |
 | `whiteboard_read` | 读出完整状态：每个形状/物体的几何与材质、相机、灯光、视口和诊断 |
-| `whiteboard_look` | 把打开的画板面板截成图片，并返回测量与警告；`overlay: 'ids'` 标出元素 id，`debug: 'shadow-only'` 只看阴影通道 |
-| `whiteboard_api` | 实时契约：工具/字段说明、默认值、调色板、当前相机与灯光、视口、限制、示例 |
+| `whiteboard_look` | 把打开的画板面板截成图片，并返回测量、警告和结构化检查；`overlay: 'ids'` 标出元素 id，`debug: 'shadow-only'` 只看阴影通道 |
+| `whiteboard_api` | 实时契约：工具/字段说明、默认值、调色板、当前相机与灯光、视口、限制、示例；`section` 只取其中一块 |
+| `whiteboard_history` | 读出内存中的撤销栈：当前 revision 以及一次撤销会恢复到的步骤 |
+| `whiteboard_undo` | 把画板后退一或多步；只在用户要求时使用 |
 
 模型只能通过 `whiteboard_look` 看到画面：只有画板 tab 在屏幕上时才可能取帧。每次改动在面板打开时也会顺带
 请求一张小图；`whiteboard_read` 不需要面板。GUI 本身有 token 围栏——浏览器不是画板的取景器。

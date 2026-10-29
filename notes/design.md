@@ -359,3 +359,24 @@ that names it: `lib/index.js` 139,767 B `7fb9bacd6b83b82b`, `lib/client.js` 550,
 `ce141c3f7644f9d2`. Against the tree the v3 run above exercised, the only difference is the two bundle
 banners and the `package.json` version — rebuilding the parent commit reproduced its committed `lib/`
 blob for blob, so the release is the tested code.
+
+### P3 — checks, history and a narrower API (2026-10-29)
+
+The first P3 slice turned the human-readable warnings into evidence and gives the model a way back:
+
+- `whiteboard_look` / `whiteboard_read` now carry structured `checks` — `bounds.2d`, `shadow.present`,
+  `shadow.single`, `shadow.opaque`, `ground.objects`, `shadow.fake` — each with `id`, `pass` and a
+  `detail`. The warning list is the failed subset, so a model can reason about `shadow.single: false`
+  instead of parsing prose. `look` also prints the pass count (`Checks: 4/6 passed.`).
+- `whiteboard_history` reports the memory-only undo stack (current revision plus the pre-mutation
+  revisions and kinds); `whiteboard_undo` steps one or more mutations back. Both share the board bar's
+  stack and remain main-agent only, with `origin === 'subagent'` skipped.
+- `whiteboard_api({section})` returns one block (`tools`, `current`, `ops`, …) instead of the whole
+  compact manifest; the whole thing is still the default.
+- The bootstrap now names `whiteboard_history` / `whiteboard_undo` in its CLEAR AND UNDO paragraph, and
+  the tool set is seven.
+
+Gate at this tree: `pnpm run check` green — typecheck, both bundles, declaration emit, artifact/wire
+contract (7 routes, 7 tools), **50 tests (47 pass, 3 Windows-only skips)**. On macOS/system Chrome the
+new build passed the e2e `tools` phase (4 PASS, 1 SKIP for no spawned subagent session) and the `look`
+phase (5 PASS, one new 995×1280 frame).

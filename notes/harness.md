@@ -340,7 +340,7 @@ belong to the main agent only.
 | say (fallback) | `POST /api/whiteboard.say { sessionId, text, requestId }` — the tab's composer normally uses the client path `ISession.beginSubmission` + `ISession.prompt`, so this route is not called |
 | tab DOM | `.dshwb-root[data-whiteboard=<mainSessionId>]`, `.dshwb-board[data-view=2d\|3d]`, `.dshwb-meta[data-tone=count\|status\|error]` (「N 个图形」/「N 个物体」), `input.dshwb-input`, bar buttons by aria: 撤销 / 导出 / 清空→确认清空 |
 | migration | at activation, `session-whiteboard-*.json` whose child session names a **live** parent is copied to `<parent>.json` (byte copy, only when absent; newest child wins per parent; unreachable parents and orphans are left alone) |
-| tools | `whiteboard_draw` / `whiteboard_3d` / `whiteboard_read` / `whiteboard_look` / `whiteboard_api` are registered per **main** agent on `agent/created`; `header.origin === 'subagent'` is skipped |
+| tools | `whiteboard_draw` / `whiteboard_3d` / `whiteboard_read` / `whiteboard_look` / `whiteboard_api` / `whiteboard_history` / `whiteboard_undo` are registered per **main** agent on `agent/created`; `header.origin === 'subagent'` is skipped |
 
 ## Harness changes that model C forced
 
@@ -544,5 +544,5 @@ on a standalone checkout without the sibling `dsh-plugin-side-chat`:
 Six phases on macOS (system Chrome, `WBDEV_HOME=/tmp/wbdev2`): `load` 29 PASS, `headline` 12,
 `say` 6, `regress` 20, `tools` 7, `look` 5 — **79 PASS, 0 FAIL**, 0 console/page/http errors.
 `regress` records one `net::ERR_ABORTED` state poll; that is the board's own `AbortController`
-cancelling an in-flight poll, not a product failure. The `tools` phase now asserts all five board
+cancelling an in-flight poll, not a product failure. The `tools` phase now asserts all seven board
 tools on the main agent and none on the subagent.
