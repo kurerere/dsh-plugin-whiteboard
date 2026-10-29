@@ -705,3 +705,12 @@ check counted one `410 (Gone)` on `whiteboard.capture.frame`, a late auto-frame 
 deliberately does not abandon. `1f7744d` makes that answer `200` with `accepted: false` — what a dropped
 frame actually is — so Chromium no longer logs an expected lost frame as a console error. The release
 run above has no console or HTTP errors at all.
+
+**Post-release gate hardening.** Two things were added after the tag and verified on their own runs.
+`check.yml` now runs `git diff --exit-code -- lib/` after `pnpm run check`, so a commit that changes
+`src/` without rebuilding the shipped bundle fails CI. The guard passed on ubuntu, macos and windows
+(run 40852963576 at `aa611b2`), which is also the first evidence that the committed `lib/` rebuilds
+byte-for-byte on all three platforms, not just on the machine that produced it. `whiteboard_api.build`
+now reports the installed `package.json` version (`src/manifest.ts` `resolveBuildVersion()`, cached,
+falls back to `dev` when the file cannot be read) instead of a permanent `dev`; the tool tests assert
+it equals the package version.

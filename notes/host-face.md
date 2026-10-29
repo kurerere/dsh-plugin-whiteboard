@@ -1,5 +1,14 @@
 # Host face — decisions and verification
 
+> **Historical: this file records the 0.2.0 Host face.** It was written when the
+> board tools were three and the routes four, and its budget table pins the
+> 8,460-character face. The current face is **seven tools and seven routes** with
+> a tab-only capture channel and a frame store: read `notes/design.md` (v3 / P3 /
+> P4) and `notes/harness.md` (0.4.0 release) for the architecture and the release
+> records. The delta is appended below as **§8 Since 0.2.0 (through 0.4.0)**. The
+> decision record itself is kept as written; only a number that would mislead a
+> current reader is corrected in place, marked "(0.4.0: …)".
+
 Scope: `src/index.ts`, `src/agent.ts`, `src/tools.ts`, `src/board-store.ts`,
 `src/migrate.ts`. Contract files (`src/scene.ts`, `src/shared.ts`), the build
 script, the tests and `package.json` are Lead-owned.
@@ -8,10 +17,10 @@ script, the tests and `package.json` are Lead-owned.
 
 A board is keyed by the **main Session id**. There is no whiteboard child session,
 no seed, no fork, no `subagent/descriptor` and no `whiteboard` provider string any
-more: the three board tools and the drawing policy are contributions **of the main
-agent itself**, and the sidebar tab is a view of that one board. This is what makes
-"draw it, then implement it" work — the board sees the whole conversation and the
-conversation's agent can draw.
+more: the board tools (three at 0.2.0, **seven since 0.4.0** — §8) and the drawing
+policy are contributions **of the main agent itself**, and the sidebar tab is a
+view of that one board. This is what makes "draw it, then implement it" work —
+the board sees the whole conversation and the conversation's agent can draw.
 
 The Host face owns three things:
 
@@ -19,7 +28,10 @@ The Host face owns three things:
    session, one JSON document per main Session.
 2. **The model-facing face** (`./agent.ts`): tools plus the policy section,
    registered into each main agent's own scope.
-3. **Four routes** (`./index.ts`): `state`, `clear`, `undo`, `say`.
+3. **Seven routes** (`./index.ts`): `state`, `clear`, `undo`, `say` — plus
+   `capture` (the panel's long poll), `capture.frame` (the panel's answer) and
+   `theme` (0.4.0: 0.2.0 had four; the three capture/theme routes arrived in
+   0.3.0 — §8).
 
 ### 1.1 Per-agent registration (probe result)
 
@@ -165,6 +177,10 @@ it.
 
 ## 5. The model-facing face and its budget
 
+At 0.2.0 the face was three tools; since 0.4.0 it is seven (`whiteboard_look` and
+`whiteboard_api` arrived in 0.3.0, `whiteboard_history` / `whiteboard_undo` in
+0.4.0 — §8). The two authoring tools below kept their shape:
+
 `whiteboard_draw` / `whiteboard_3d` take a flat `ops` array — one object with
 `op: add|update|remove|clear` plus that kind's scalars and shared style/geometry
 fields — because a flat list is what a model gets right and one object spec is what
@@ -176,10 +192,10 @@ before anything is written, and returns `{ tool, added, updated, removed, counts
 summary }`. Unknown ids reject the whole batch and list the ids that exist;
 validation errors name the op index, the kind and what was expected.
 
-The registrations are a **permanent, per-request tax**, so the text is budgeted and
-pinned by `scripts/face-budget.test.mjs`:
+At 0.2.0 the registrations were a **permanent, per-request tax**, so the text was
+budgeted and pinned by `scripts/face-budget.test.mjs`:
 
-| piece | size |
+| piece (0.2.0) | size |
 |---|---|
 | `whiteboard_draw` declaration | 2,853 chars (description 144 + parameters 2,652) |
 | `whiteboard_3d` declaration | 2,413 chars (description 134 + parameters 2,224) |
@@ -188,12 +204,26 @@ pinned by `scripts/face-budget.test.mjs`:
 | drawing policy section | **2,999** (ceiling 3,100) |
 | whole per-request tax | **8,460** ≈ 2.3–2.4k tokens (ceiling 8,700) |
 
+**0.4.0: the budget is history, the numbers are not.** The seven declarations now
+cost **10,212 characters** and the policy **1,423** — **11,635** in total, ≈3.2k
+tokens (README "What it costs"; design.md "Where the board's model-facing face
+lives"). The policy section shrank from 2,999 to 1,423 when the technical contract
+moved into the queryable `whiteboard_api` manifest, while the declarations grew
+with the tool set. `scripts/face-budget.test.mjs` no longer pins a character
+ceiling at all: it pins the **seven tool names** and the safety rules (`DRAW ONLY
+WHEN ASKED`, `whiteboard_api`, `whiteboard_look`, `Revise by id`, `Never open the
+GUI`), because the resident size is no longer the contract.
+
 The tool descriptions are one line each and point at the policy section; the
 policy owns the single copy of the coordinate spaces, palette, liveness rule, id
 discipline and undo, plus one compact 2D example. Two capability edges were traded
 for the budget: the model can no longer set a 2D canvas background/grid or 3D
 lights (both remain in `View3DPatch`/`Scene3D` for the client; the 3D scene keeps
-its default lighting and follows the panel theme).
+its default lighting and follows the panel theme). **0.4.0: the lights half is
+stale** — the light rig was handed back to the model (`view.lights`, `castShadow`,
+shadow-map tuning; design.md "Tools"), so only the 2D canvas background/grid stays
+reserved (`view2d.accepted: false` in the manifest), and the policy no longer
+carries the technical contract at all: `whiteboard_api` does.
 
 ## 6. What was deleted (do not resurrect)
 
@@ -240,3 +270,92 @@ string survives only as `LEGACY_WHITEBOARD_ID_PREFIX` for the migration scan.
   order and size, state for a Session with no board (rev 0, no file written,
   legacy and malformed ids rejected), clear→undo→no-op undo, and `say`
   (delegation shape, minted requestId, 400/404/500/503 paths) — ALL PASS.
+
+## 8. Since 0.2.0 (through 0.4.0)
+
+Everything above describes the 0.2.0 face. This section is the delta that matters
+to the Host, and where each fact is recorded now.
+
+**Tools: three → seven.** 0.2.0 shipped `whiteboard_draw`, `whiteboard_3d` and
+`whiteboard_read`. `whiteboard_look` (capture) and `whiteboard_api` (the live
+manifest) arrived in 0.3.0 — the wire contract then counted 5 tools — and
+`whiteboard_history` / `whiteboard_undo` made it seven in 0.4.0. `BOARD_TOOLS` in
+`src/shared.ts` lists all seven (design.md "Tools"; `scripts/face-budget.test.mjs`
+pins the exact seven-name list; `scripts/verify-artifacts.mjs` requires every one
+of them in `lib/index.js`).
+
+**Routes: four → seven.** `state`, `clear`, `undo` and `say` kept their shape. The
+0.3.0 capture channel added two: `GET /api/whiteboard.capture` (the open panel's
+long poll for a pending frame request; **204** when there is none) and
+`POST /api/whiteboard.capture.frame` (the panel's answer with the PNG). The third
+is `POST /api/whiteboard.theme` — the client reports the app palette at activation
+and on every flip, so `whiteboard_api` knows the theme before the 画板 tab has ever
+been opened. `src/shared.ts` declares exactly seven paths, `src/index.ts` serves
+each, and `scripts/verify-artifacts.mjs` fails if the count is not seven or a
+retired route survives in either bundle.
+
+**Context tax: 8,460 → 11,635 characters.** The seven declarations measure 10,212
+characters and the policy 1,423 — **11,635** in total, about 3.2k tokens (README
+"What it costs"; design.md "Where the board's model-facing face lives"). The
+policy shrank because its technical contract (coordinate spaces, palette,
+defaults, lights, limits, examples) moved into the queryable `whiteboard_api`
+manifest. `scripts/face-budget.test.mjs` now pins the seven tool names and the
+load-bearing safety rules instead of a character ceiling; its header comment says
+why — size is no longer the contract.
+
+**Structured checks.** `whiteboard_read` / `whiteboard_look` carry `checks` —
+`bounds.2d`, `shadow.present`, `shadow.single`, `shadow.opaque`, `ground.objects`
+and `shadow.fake` — each `{ id, pass, detail }`, and the warning list is the
+failed subset (`Checks: 4/6 passed.` in the result line). The checks are pure, so
+a dry run reports them for the uncommitted document too (design.md P3;
+`boardChecks` / `warningsOf` in `src/tools.ts`).
+
+**History and undo tools.** `whiteboard_history` reports the memory-only stack
+(current revision plus the pre-mutation revisions and kinds); `whiteboard_undo`
+steps one or more mutations back. Both read the same store stack the bar's button
+follows, both stay main-agent only, and `origin === 'subagent'` is still skipped
+(design.md P3; `src/tools.ts`).
+
+**Deep look: per-light, turntable, diff.** `whiteboard_look` accepts
+`debug: 'per-light'` (a 3D contact sheet, one tile per shadow-casting light),
+`angles: 'turntable'` (four yaw views, 2×2) and `diffAgainst` — `previous` /
+`rev:<n>` re-render a document from the memory-only undo history with the
+**current** camera, while a 6–16 character frame hash compares two stored images
+through the frame index. The Host verifies the answer before saving it (`mode`
+plus `tiles` / `diff` presence), so a panel that ignored the options cannot
+persist a plain frame labelled as a sheet (design.md P4; harness.md "What crosses
+the wire").
+
+**Dry runs.** Both draw tools take `dryRun: true`: no store mutation, no undo
+entry, no revision bump; the panel renders the hypothetical document offscreen,
+the PNG is indexed with `source: 'preview'`, and the result line says `nothing
+was committed` and reports the preview's own `checks` / `warnings`. A dry run with
+no panel is an error, unlike a normal draw, because a preview nobody can see is
+not a preview (design.md P4; `dryRunSummary` / `previewFrame` in `src/tools.ts`).
+
+**The frame store grew an index.** Content-addressed PNGs are unchanged
+(`<dsh home>/storages/whiteboard/frames/<session>/<hash>.png`), but each session
+also has `frames/<session>/index.json`: newest-first records (max 64) with
+`hash`, path, bytes, ISO timestamp, size, `mode`, `rev`, `source` (`look` /
+`auto` / `preview` / `diff`), optional camera and capture options. It is written
+atomically (`0600`, temp + rename) and serialised per session; a failed index
+write is logged and never fails the save, and the save that evicts a record deletes
+its PNG. `byHash` resolves a 6+ hex prefix, case-insensitively (design.md P4;
+harness.md "The frame index on disk"; `src/frames.ts`).
+
+**Viewport on the state poll.** `GET /api/whiteboard.state` accepts optional
+`vw` / `vh` / `dpr`; the Host records them with `captures.noteViewport`, so
+`whiteboard_api` can report the stage size before the first frame is captured.
+Implausible values are ignored, the DPR is clamped, and a later capture refreshes
+the value (design.md v3; `src/index.ts`, `src/client/poll.ts`).
+
+**A late capture answer is 200 with `accepted: false`.** A late or duplicate
+`POST /api/whiteboard.capture.frame` used to answer `410 Gone`. Dropping the frame
+is the expected outcome, and Chromium logs every non-2xx as a console error, so it
+now answers `200 { accepted: false }` (0.4.0, commit `1f7744d`; design.md "Released
+as 0.4.0", harness.md "0.4.0 release"; `src/capture.ts`).
+
+**Unchanged.** The store document (`{ version: 1, rev, board }`), keying by the
+main Session id, the one-time legacy migration, per-agent registration from
+`agent/created`, the memory-only 12-entry undo stack and the `say` delegation are
+as described above.

@@ -1,22 +1,35 @@
 # Whiteboard — client face notes
 
+> **Historical: this file records the 0.2.0 client face.** It was written before
+> the panel could capture a frame, so "Transport" describes the state poll only
+> and "The bar" describes mode chips that are now conditional. Since 0.3.0 the
+> panel is also the model's camera, and 0.4.0 added contact sheets, diffs and
+> offscreen dry-run previews; the current architecture is in `notes/design.md`
+> (v3 / P3 / P4) and the release records in `notes/harness.md` (0.4.0 release).
+> The delta is appended below as **Since 0.2.0 (through 0.4.0)**; the decision
+> record above is kept as written, with misleading current-tense numbers corrected
+> in place.
+
 Decisions and hard-won details of the browser face. Files are all under
 `src/client/`; `artwork.tsx` is the Lead's guide artwork (imported, not edited).
 
 ## One board, one conversation
 
-The board belongs to the **main** Session: the three board tools belong to the
-main agent, the Host keys its board document by the main Session id, and the
-right-sidebar tab is only a view of that document. The tab therefore creates
-nothing and retains nothing — no `SessionProvider`, no `ctx.sessions.retain`, no
-child Session id anywhere in the client. `sidebar.right.pane.tab` is declared
-`scope: 'session'`, so the body's `sessionId` and `useSession` are already the
-main Session; that is what the board polls and what the input sends into.
+The board belongs to the **main** Session: the board tools (three at 0.2.0,
+**seven since 0.4.0** — see the closing section) belong to the main agent, the
+Host keys its board document by the main Session id, and the right-sidebar tab is
+only a view of that document. The tab therefore creates nothing and retains
+nothing — no `SessionProvider`, no `ctx.sessions.retain`, no child Session id
+anywhere in the client. `sidebar.right.pane.tab` is declared `scope: 'session'`,
+so the body's `sessionId` and `useSession` are already the main Session; that is
+what the board polls and what the input sends into.
 
 ## Transport
 
 The Host owns the board document and the browser polls it:
-`useBoard(sessionId, running)` in `poll.ts` is the whole client transport.
+`useBoard(sessionId, running, active = true, viewport?)` in `poll.ts` is the board
+transport. (Since 0.3.0 there is a second one — the capture channel in
+`capture.ts`; see the closing section.)
 
 - `GET /api/whiteboard.state?sessionId=<main id>` → `{ rev, board, canUndo }`;
   initial fetch, then 350 ms while the main agent runs and 1500 ms when idle.
@@ -113,12 +126,13 @@ caret-in-a-text-field guard stays, so the tab's own input keeps native undo.
 
 ## The bar
 
-`2D / 3D` chips, one status slot, three icon actions (撤销 / 导出 / 清空), 51 px
-high. The status slot carries, in priority order: the last action error, the armed
-clear confirmation, the transient status (「已撤销上一批」/「已恢复清空前的画板」,
-4 s; errors 6 s), otherwise the shape/object count. Nothing is added to or removed
-from the row, so no state can make it wrap, and the count returning shifts only the
-slack between the slot and the actions.
+`2D / 3D` chips (since 0.2.2 rendered only when **both** surfaces have content —
+see the closing section), one status slot, three icon actions (撤销 / 导出 / 清空),
+51 px high. The status slot carries, in priority order: the last action error, the
+armed clear confirmation, the transient status (「已撤销上一批」/「已恢复清空前的画板」,
+4 s; errors 6 s), otherwise the shape/object count. The status slot never adds or
+removes a row element, so no state can make it wrap, and the count returning shifts
+only the slack between the slot and the actions.
 
 - `[role='tablist'] { flex: none }` keeps the mode chips at their measured width
   when a long error is on screen (they used to shrink 100 → 66 px).
@@ -166,3 +180,85 @@ input row 69 px, empty hint fits. Screenshots: `shots/tab-light.png`,
 - **Export**: `.scratch/client-face/download-test.mjs` drives a real Chromium over
   CDP, clicks the same temporary `<a download>` with a `data:` URL the button uses,
   and asserts a valid PNG lands on disk with the exact file name.
+
+## Since 0.2.0 (through 0.4.0)
+
+The transport, the bar and the renderers above describe the client as it stood at
+0.2.0 ("Sending" already carries the 0.2.1 gate). Four slices since then changed
+this face; each line names the code that carries it now.
+
+**0.2.1 — the input became fullscreen-only.** As "Sending" records above, the
+tab's own input exists exactly while `tabInfo.sidebar.fullscreen`, because docked
+beside the conversation the shipped composer is the only input, and two composers
+over one draft is a conflict.
+
+**0.2.2 — no switch without two surfaces, and the board reveals itself.**
+`mounts.tsx` computes `has2d` / `has3d` from the document and renders the `2D / 3D`
+chips only when **both** have content; with one surface the board shows the one
+that has content, so a cleared 3D scene can no longer leave a board full of 2D
+shapes looking empty. `reveal.ts` watches the on-screen conversation's board and
+opens the tab the **first** time that board's revision grows — once per
+conversation per page lifetime. The first observation only records the revision,
+so switching to a conversation that already has a drawing never pops the panel,
+and once the tab is active the watcher stops (design.md "Client").
+
+**0.3.0 — the panel became the model's camera, and reports the theme.**
+`capture.ts` is a second transport beside `useBoard`: the open panel long polls
+`GET /api/whiteboard.capture` and answers `POST /api/whiteboard.capture.frame`
+with the PNG of the surface it is showing. There is no headless renderer, so a
+closed panel simply never answers and the Host times the request out with a
+readable "open the 画板 tab" error. The same module runs the poll and submits the
+answer. `index.ts` also reports the app palette to
+`POST /api/whiteboard.theme` at activation and on every flip, so `whiteboard_api`
+knows the theme even before the 画板 tab has ever been opened (design.md v3;
+harness.md "Deep look + dry run").
+
+**0.4.0 — checks and history reach the model; the panel renders pictures the user
+is not looking at.** P3 is Host-only (structured `checks`, `whiteboard_history` /
+`whiteboard_undo`), so nothing in this face changed for it beyond the tool set.
+P4 is where the client grew:
+
+- **Deep look requests.** `whiteboard_look({debug: 'per-light'})` and
+  `angles: 'turntable'` ask for a 3D contact sheet — one tile per shadow-casting
+  light (2 columns), or four yaw views as 2×2 with `0°`/`90°`/`180°`/`270°`
+  captions. Both are 3D-only: `mounts.tsx` throws "…switch the panel to 3D and
+  retry" when the displayed surface is 2D, instead of returning a plain 2D frame
+  under a sheet-shaped summary.
+- **Diff.** `diffAgainst` re-renders a document baseline **offscreen** with the
+  current camera, or compares a stored PNG; `diff.ts` decodes both, scales the
+  before frame to the after size, compares RGB with a per-channel delta ≤ 8
+  (antialiasing noise), and composes a **3-column** `before` / `after` /
+  `changed` sheet (dimmed after + red changed pixels + bounding box + `N%
+  changed`), 720–1800 px total. A baseline whose surface differs from the frame is
+  refused (`capture.ts`), so a 2D canvas is never compared with a 3D scene.
+- **Dry-run previews render offscreen.** A dry run hands the panel the
+  hypothetical document as `CaptureRequest.preview`. A 3D preview goes through a
+  fixed, off-screen, inert **960×600** stage (`.dshwb-previewStage`,
+  `visibility:hidden`, `pointer-events:none`, `aria-hidden`) mounted only while
+  the tab can answer a capture (`stageReady && visible !== false`), so the
+  visible stage's orbit, scroll and pixels are untouched. The hidden engine is
+  created once per mounted tab and disposed with it, so a background or collapsed
+  body holds no extra WebGL context. It renders at the panel's own CSS size / dpr,
+  not the hidden box's aspect, and its answer omits `viewport` so a preview cannot
+  overwrite the real panel size.
+- **The 2D preview is a static painter.** `renderBoardFrame` in `render2d.tsx`
+  paints a document with no stage and **no appear animation**; it is also the 2D
+  document baseline.
+- **Viewport reporting.** `useBoard` takes a fourth argument, a
+  `BoardViewportSource` ref; each state poll sends `vw` / `vh` / `dpr` rounded from
+  the measured stage, and the Host ignores implausible values and clamps the DPR,
+  so `whiteboard_api` reports the panel size before the first capture.
+- **The capture poll is visibility-gated.** 250 ms (`POLL_INTERVAL`) and only
+  while the tab is genuinely capturable: `active = ready && visible !== false` and
+  `document.visibilityState === 'visible'` both gate the loop. A hidden, collapsed
+  or background tab stops entirely instead of rendering a screenshot the user
+  cannot check (harness.md "What crosses the wire"; `src/client/capture.ts`).
+- **Late capture answers.** The client deliberately does not abandon a late
+  auto-frame; the Host now answers `200 { accepted: false }` instead of `410`, so
+  Chromium no longer logs an expected lost frame as a console error (harness.md
+  "0.4.0 release").
+
+**Unchanged.** The state poll's revision gating (`applied` vs `gate`), the
+`wakeBoard` immediate-refresh channel, the clear-armed-per-surface rule, the
+`Ctrl/Cmd+Z` listener's "is this tab actually on screen" proof, the 2D canvas /
+three.js renderers and the export path are as described above.
