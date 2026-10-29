@@ -29,7 +29,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
 import type { CaptureOptions, CaptureRequest, CaptureViewport, WhiteboardUndone } from '../shared.ts'
 import type { BoardMode, BoardState, Camera3D } from '../scene.ts'
 import { surfaceCount } from './board.ts'
-import { capture2d, useCapture, type CaptureFrame } from './capture.ts'
+import { capture2d, captureSize, captureWidthLimit, useCapture, type CaptureFrame } from './capture.ts'
 import type { DraftFace } from './model.ts'
 import { surfacePaint } from './palette.ts'
 import { useBoard } from './poll.ts'
@@ -305,6 +305,9 @@ function WhiteboardBoard({ sessionId, running, visible, standalone, clear, undo,
 
   /** The stage has been measured; after this its canvas or WebGL engine exists. */
   const stageReady = size.width > 0 && size.height > 0
+  /** Latest stage size, for previews that must use the panel's aspect at capture time. */
+  const latestSize = useRef(size)
+  latestSize.current = size
 
   /**
    * Latest board and surface, read by the capture hook at capture time. Keeping
@@ -363,10 +366,26 @@ function WhiteboardBoard({ sessionId, running, visible, standalone, clear, undo,
         const camera = sameCamera(preview.scene.camera, live)
           ? capture3d.current?.view() ?? live
           : preview.scene.camera
-        const frame = stage.renderDocument(preview.scene, options, camera)
-        // The hidden stage's viewport describes the preview box, not the panel
-        // the user is looking at: report the pixels, the camera and any sheet
-        // captions, and leave the panel viewport to the plain-capture path.
+        // Render at the size the live panel would produce, not at the hidden
+        // box's landscape aspect: the preview has to show the framing the model
+        // would actually get after committing, and the viewport reference makes
+        // the id plates come out at the live panel's scale.
+        const panel = latestSize.current
+        const dpr = globalThis.devicePixelRatio || 1
+        const viewport: CaptureViewport = {
+          width: Math.max(1, Math.round(panel.width)),
+          height: Math.max(1, Math.round(panel.height)),
+          dpr,
+        }
+        const backing = {
+          width: Math.max(1, Math.floor(viewport.width * Math.min(dpr, 2))),
+          height: Math.max(1, Math.floor(viewport.height * Math.min(dpr, 2))),
+        }
+        const output = captureSize(backing.width, backing.height, captureWidthLimit(options.maxWidth, 1_280))
+        const frame = stage.renderDocument(preview.scene, options, camera, output, viewport)
+        // Report the pixels, the camera and any sheet captions; the panel
+        // viewport stays out of the answer so a preview cannot overwrite the
+        // stage size `whiteboard_read` reports.
         return {
           png: frame.png,
           width: frame.width,
