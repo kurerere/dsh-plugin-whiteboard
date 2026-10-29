@@ -286,7 +286,11 @@ export function apply(ctx: Context): void {
       }
       try {
         const result = captures.submit(answer)
-        return json(result satisfies CaptureAccepted, result.accepted ? 200 : 410)
+        // A late or duplicate answer is an expected outcome, not an HTTP failure:
+        // the auto-frame budget is 1.5 s, and a 3D panel may finish rendering after
+        // it. The body says `accepted: false`; answering 410 made Chromium log the
+        // ignored frame as a console error during every slow 3D turn.
+        return json(result satisfies CaptureAccepted)
       } catch (error) {
         return failure(error)
       }
