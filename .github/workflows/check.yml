@@ -40,6 +40,8 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm run check
+      # lib/ 是提交进仓库的构建产物：重建结果与提交的 bundle 不一致，说明改了 src 却忘了 rebuild，必须让 CI 失败
+      - run: git diff --exit-code -- lib/
       # platform.mjs is imported by dev.mjs, which the suite never loads, so a
       # POSIX-only import error would pass every test above. One read-only command
       # proves the harness itself starts on this OS and can talk to lsof/netstat
