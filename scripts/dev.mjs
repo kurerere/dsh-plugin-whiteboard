@@ -50,7 +50,10 @@ const WORKSPACE = dirname(PLUGIN_DIR)
 const WHITEBOARD_PKG = 'dsh-plugin-whiteboard'
 const SIDE_CHAT_PKG = 'dsh-plugin-side-chat'
 const SIDE_CHAT_DIR = join(WORKSPACE, SIDE_CHAT_PKG)
-const PLUGIN_DIRS = [join(WORKSPACE, SIDE_CHAT_PKG), PLUGIN_DIR]
+// The side-chat plugin is optional: a standalone checkout of this plugin must
+// still get a dev Host, so only directories that really carry a package are
+// linked. The whiteboard itself is always present.
+const PLUGIN_DIRS = [SIDE_CHAT_DIR, PLUGIN_DIR].filter((dir) => existsSync(join(dir, 'package.json')))
 const BUNDLES_BASE = ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']
 
 const DEFAULT_HOME = join(WORKSPACE, '.wbdev')
@@ -375,7 +378,8 @@ function setup(opts) {
   // 3. initialize the profile if needed (dsh seeds base + writes the manifest).
   if (!existsSync(p.manifest)) {
     log(`dev: initializing profile ${opts.profile}`)
-    const init = runDsh(['plugin', '--profile', opts.profile, 'add', `link:${toPosix(PLUGIN_DIRS[0])}`], { home: p.home })
+    const seed = PLUGIN_DIRS[0] ?? PLUGIN_DIR
+    const init = runDsh(['plugin', '--profile', opts.profile, 'add', `link:${toPosix(seed)}`], { home: p.home })
     if (init.status !== 0) {
       console.error(init.out)
       die('profile initialization failed')
@@ -501,7 +505,10 @@ async function start(opts) {
     startedAt: new Date().toISOString(),
     baseUrl: `http://127.0.0.1:${opts.port}/`,
     url: null,
-    build: { whiteboard: buildState(PLUGIN_DIR), sideChat: buildState(SIDE_CHAT_DIR) },
+    build: {
+      whiteboard: buildState(PLUGIN_DIR),
+      ...(existsSync(join(SIDE_CHAT_DIR, 'package.json')) ? { sideChat: buildState(SIDE_CHAT_DIR) } : {}),
+    },
   }
 
   log(`dev: host pid ${child.pid} booting on port ${opts.port} (log ${logFile})`)

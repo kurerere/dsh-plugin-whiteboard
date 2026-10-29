@@ -23,9 +23,15 @@
  * Board documents and session logs are read from disk, so every claim has a
  * host-side witness next to the browser observation.
  *
- *   node scripts/e2e.mjs [--phase load|headline|say|regress|tools|all]
+ *   node scripts/e2e.mjs [--phase load|headline|say|regress|tools|look|all]
  *                        [--headed] [--url <tokenized url>] [--out <report.json>]
- *                        [--timeout 240000] [--draw-prompt "…"] [--keep-session]
+ *                        [--timeout 240000] [--draw-prompt "…"] [--look-prompt "…"]
+ *                        [--keep-session]
+ *
+ * The browser is a system Chrome when one is available (macOS default, or
+ * `WBDEV_CHROME_PATH`); that lets the harness run from an npx Playwright package
+ * without downloading a second browser. WebGL gets SwiftShader flags so the 3D
+ * phase works headless.
  *
  * Screenshots and the JSON report land in .wbdev/shots/.
  */
@@ -72,9 +78,13 @@ const opts = {
   timeoutMs: Number(arg('timeout', 240_000)),
   drawPrompt: arg('draw-prompt', '在画板上画一个三栏看板：待办 / 进行中 / 完成，三列并排，画完告诉我你画了什么。'),
   sayPrompt: arg('say-prompt', '在白板上补一行标题：审批流程'),
+  lookPrompt: arg(
+    'look-prompt',
+    '在画板上画一个简单的 3D 球（画板 tab 已经打开），画完后必须调用 whiteboard_look 看一下，最后用一句话说你看到了什么。',
+  ),
   keepSession: has('keep-session'),
 }
-const PHASES = ['load', 'headline', 'say', 'regress', 'tools']
+const PHASES = ['load', 'headline', 'say', 'regress', 'tools', 'look']
 const RUN = opts.phase === 'all' ? PHASES : [opts.phase]
 if (!RUN.every((p) => PHASES.includes(p))) {
   console.error(`e2e: unknown phase "${opts.phase}" (use ${PHASES.join('|')}|all)`)
@@ -146,6 +156,47 @@ function readBoardDoc(sessionId) {
     return JSON.parse(readFileSync(boardFile(sessionId), 'utf8'))
   } catch {
     return null
+  }
+}
+
+/** Where the Host writes frames captured by `whiteboard_look` / auto-frames. */
+const FRAMES_DIR = join(BOARD_DIR, 'frames')
+
+/** Every persisted frame, oldest first, with its byte size and mtime. */
+function listFrames() {
+  try {
+    const out = []
+    for (const session of readdirSync(FRAMES_DIR)) {
+      const dir = join(FRAMES_DIR, session)
+      if (!statSync(dir).isDirectory()) continue
+      for (const name of readdirSync(dir)) {
+        if (!name.endsWith('.png')) continue
+        const file = join(dir, name)
+        const st = statSync(file)
+        out.push({ file, bytes: st.size, mtime: st.mtimeMs })
+      }
+    }
+    return out.sort((a, b) => a.mtime - b.mtime)
+  } catch {
+    return []
+  }
+}
+
+/** Read a PNG's signature and IHDR dimensions without an image decoder. */
+function pngInfo(file) {
+  try {
+    const buf = readFileSync(file)
+    const ok = buf.length >= 33
+      && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47
+    return {
+      ok,
+      width: ok ? buf.readUInt32BE(16) : 0,
+      height: ok ? buf.readUInt32BE(20) : 0,
+      bytes: buf.length,
+      file,
+    }
+  } catch {
+    return { ok: false, width: 0, height: 0, bytes: 0, file }
   }
 }
 
@@ -250,11 +301,26 @@ const resultTexts = (records) =>
 // ---------------------------------------------------------------------------
 const { pw, dir, pin } = await loadPlaywright()
 report.pw = { dir, pin }
-console.log(`e2e: playwright-core ${pin}; phase ${opts.phase}`)
+console.log(`e2e: playwright ${pin}; phase ${opts.phase}`)
 console.log(`e2e: url ${report.url}`)
 
-const browser = await pw.chromium.launch({ headless: !opts.headed, args: ['--no-sandbox', '--use-gl=swiftshader'] })
-report.browser = { version: browser.version() }
+// Prefer the machine's Chrome so an npx Playwright package does not also need a
+// matching browser revision. WebGL gets SwiftShader flags for the 3D phase.
+const systemChrome = process.env.WBDEV_CHROME_PATH
+  ?? (process.platform === 'darwin' ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' : null)
+const launchOptions = {
+  headless: !opts.headed,
+  args: ['--no-sandbox', '--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'],
+}
+if (systemChrome !== null && existsSync(systemChrome)) launchOptions.executablePath = systemChrome
+else if (systemChrome !== null) console.log(`e2e: chrome not found at ${systemChrome}; falling back to Playwright's browser`)
+
+const browser = await pw.chromium.launch(launchOptions)
+report.browser = {
+  version: browser.version(),
+  executablePath: launchOptions.executablePath ?? null,
+  args: launchOptions.args,
+}
 const context = await browser.newContext({
   viewport: { width: 1500, height: 950 },
   deviceScaleFactor: 2,
@@ -1471,7 +1537,7 @@ async function phaseTools() {
   // `request/header` record whose `data.header.tools[]` is exactly the tool list
   // the agent was offered, so tool visibility can be asserted without asking the
   // model anything.
-  const BOARD_TOOLS = new Set(['whiteboard_draw', 'whiteboard_3d', 'whiteboard_read'])
+  const BOARD_TOOLS = new Set(['whiteboard_draw', 'whiteboard_3d', 'whiteboard_read', 'whiteboard_look', 'whiteboard_api'])
   const dump = listSessions().map(({ id }) => {
     const records = sessionRecords(id)
     const head = records[0] ?? {}
@@ -1494,9 +1560,9 @@ async function phaseTools() {
   })
   report.toolSchemas = dump
 
-  const currentMain = dump.filter((s) => !s.legacy && s.origin !== 'subagent' && s.board.length === 3)
+  const currentMain = dump.filter((s) => !s.legacy && s.origin !== 'subagent' && s.board.length === BOARD_TOOLS.size)
   check(
-    'main agent tool schema includes all three board tools',
+    'main agent tool schema includes all five board tools',
     currentMain.length > 0,
     currentMain.length
       ? `${currentMain.length} main session(s) with ${currentMain[0].toolCount} tools incl. ${currentMain[0].board.join(', ')}`
@@ -1521,14 +1587,14 @@ async function phaseTools() {
   const prompts = [
     [
       '用 subagent 工具创建一个子代理，任务原话是：',
-      '"检查你自己的工具列表里有没有 whiteboard_draw、whiteboard_3d、whiteboard_read 这三个工具。',
+      '"检查你自己的工具列表里有没有 whiteboard_draw、whiteboard_3d、whiteboard_read、whiteboard_look、whiteboard_api 这五个工具。',
       '如果有，就调用 whiteboard_draw（ops 传空数组）并把结果贴出来；',
       '如果没有，只回复 NO_WHITEBOARD_TOOLS。"',
       '然后把子代理的最终回复原样贴给我，不要改写。',
     ].join('\n'),
     [
       '必须真的调用 subagent 工具（工具列表里名为 subagent 的那个）创建子代理，不要自己回答这个问题。',
-      '子代理任务原话："检查你的工具列表里有没有 whiteboard_draw / whiteboard_3d / whiteboard_read；',
+      '子代理任务原话："检查你的工具列表里有没有 whiteboard_draw / whiteboard_3d / whiteboard_read / whiteboard_look / whiteboard_api；',
       '有就调用 whiteboard_draw（ops 传空数组），没有就只回复 NO_WHITEBOARD_TOOLS。"',
       '把子代理最终回复原样贴回来。',
     ].join('\n'),
@@ -1611,6 +1677,94 @@ async function phaseTools() {
 }
 
 // ---------------------------------------------------------------------------
+// phase: look
+// ---------------------------------------------------------------------------
+/**
+ * The picture loop: with the board tab on screen, the model draws and calls
+ * `whiteboard_look`, the panel answers with a frame, and the Host persists it.
+ * Both the tool call (session log) and the PNG (frame store) are host-side
+ * witnesses, so a green result cannot be a transcript-only illusion.
+ */
+async function phaseLook() {
+  await openApp()
+  const fresh = await newSession()
+  // Prefer the id the app reported after creating the conversation; `mainSessionId`
+  // can still describe the previous one while the new view mounts.
+  const sid = fresh.created ? fresh.after : ((await mainSessionId()) ?? fresh.before)
+  if (sid === null) throw new Error('no main session after 新建会话')
+  if ((await mainSessionId()) !== sid) {
+    const selected = await selectSession(sid)
+    if (!selected) throw new Error(`could not select the look conversation ${sid}`)
+  }
+  // The capture route is polled only while this tab is on screen; open it before
+  // asking for a look, then let the model draw and inspect in the same turn.
+  const dom = await openWhiteboardTab()
+  if (dom.sessionId !== sid) throw new Error(`the tab is bound to ${dom.sessionId ?? 'none'}, expected ${sid}`)
+  const framesBefore = listFrames()
+  const turnsBefore = countTypes(sessionRecords(sid))
+  const t0 = Date.now()
+  await sendFromMainComposer(opts.lookPrompt)
+  const started = await waitFor(() => {
+    const counts = countTypes(sessionRecords(sid))
+    return (counts['turn/start'] ?? 0) > (turnsBefore['turn/start'] ?? 0) ? counts : null
+  }, 60_000, 500)
+  check(
+    'look turn started',
+    started.ok,
+    started.ok ? `turn/start ${started.value['turn/start']} (${started.elapsedMs} ms)` : 'no turn/start within 60 s',
+  )
+  const idle = await waitForIdle(sid, opts.timeoutMs)
+  check(
+    'look turn finished',
+    idle.ok,
+    `turn/start ${idle.starts} / turn/end ${idle.ends} (~${idle.elapsedMs} ms)`,
+  )
+
+  const calls = toolCalls(sessionRecords(sid))
+  const lookCalls = calls.filter((name) => name === 'whiteboard_look')
+  check(
+    'whiteboard_look was called by the main agent',
+    lookCalls.length > 0,
+    lookCalls.length > 0
+      ? `${lookCalls.length} whiteboard_look call(s)`
+      : `no whiteboard_look in [${[...new Set(calls)].slice(0, 12).join(', ')}]`,
+  )
+
+  const grown = await waitFor(() => {
+    const now = listFrames()
+    return now.length > framesBefore.length ? now : null
+  }, 30_000, 500)
+  const beforeFiles = new Set(framesBefore.map((frame) => frame.file))
+  const freshFrames = (grown.ok ? grown.value : listFrames()).filter((frame) => !beforeFiles.has(frame.file))
+  check(
+    'a new PNG frame was persisted under storages/whiteboard/frames',
+    freshFrames.length > 0,
+    `${framesBefore.length} -> ${framesBefore.length + freshFrames.length} frames`,
+  )
+  const newest = freshFrames.at(-1)
+  const info = newest === undefined ? null : pngInfo(newest.file)
+  check(
+    'the captured frame is a valid PNG with dimensions',
+    info?.ok === true,
+    info === null ? 'no new frame' : `${info.width}x${info.height} ${info.bytes}B ${info.file}`,
+  )
+  const transcript = await transcriptText()
+  await shot(page, 'c-09-look')
+  report.phases.look = {
+    sessionId: sid,
+    elapsedMs: Date.now() - t0,
+    newSession: fresh,
+    turnStarted: started.ok,
+    lookCalls,
+    frames: freshFrames.map((frame) => frame.file),
+    png: info,
+    tab: { sessionId: dom.sessionId, view: dom.view, meta: dom.meta },
+    transcriptTail: transcript.slice(-800),
+  }
+  return sid
+}
+
+// ---------------------------------------------------------------------------
 // run
 // ---------------------------------------------------------------------------
 // Sampled before and after the phases: if the dev Host is restarted underneath a
@@ -1624,6 +1778,7 @@ try {
   if (RUN.includes('say')) await phaseSay()
   if (RUN.includes('regress')) await phaseRegress()
   if (RUN.includes('tools')) await phaseTools()
+  if (RUN.includes('look')) mainSid = await phaseLook()
 } catch (err) {
   check(`phase ${opts.phase} completed`, false, err.stack?.split('\n').slice(0, 3).join(' | ') ?? String(err))
   try {

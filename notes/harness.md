@@ -190,10 +190,13 @@ The machine already has a pinned Playwright; the harness never downloads one.
 | browsers | `PLAYWRIGHT_BROWSERS_PATH=D:\Caches\playwright`, `chromium-1243` (mirrored in `%LOCALAPPDATA%\ms-playwright`) |
 | why it matches | 1.63.0's `browsers.json` pins chromium revision 1243, exactly what is installed |
 
-`scripts/pw.mjs` resolves the package (override with `WBDEV_PLAYWRIGHT_DIR=<dir containing
-index.js>`; if it disappears, `npx --yes playwright@1.63.0` and point the variable at the
-npx cache). `e2e.mjs` runs headless by default (`--headed` to watch) at 1500×950 with
-`deviceScaleFactor: 2`, so every screenshot is 2× (icon review needs it).
+`scripts/pw.mjs` resolves the package in order: `WBDEV_PLAYWRIGHT_DIR`, the workspace
+`node_modules`, npm `_npx` caches, then the original Windows store. `e2e.mjs` prefers a
+system Chrome (`WBDEV_CHROME_PATH`; macOS defaults to
+`/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`) so an npx package needs no
+browser download; otherwise Playwright's own browser is used. `e2e.mjs` runs headless by
+default (`--headed` to watch) at 1500×950 with `deviceScaleFactor: 2`, so every screenshot
+is 2× (icon review needs it).
 
 ---
 
@@ -283,7 +286,7 @@ UI (a useful alternative, but every attached browser changes with it).
 | plugin row missing from the app | `did not activate` in the log; `dev.mjs rebuild` |
 | browser shows 401 | tokenized URL (`dev.mjs url --show-token`), or reload after a restart |
 | e2e cannot find the guide | re-run; check `e2e-01-app.png` (a leftover dialog would be visible) |
-| `playwright-core 1.63.0 not found` | set `WBDEV_PLAYWRIGHT_DIR` |
+| `playwright-core 1.63.0 not found` | set `WBDEV_PLAYWRIGHT_DIR`, make a `playwright`/`playwright-core` available in the workspace `node_modules`, or let the npx-cache scan find one |
 
 ---
 
@@ -337,11 +340,11 @@ belong to the main agent only.
 | say (fallback) | `POST /api/whiteboard.say { sessionId, text, requestId }` — the tab's composer normally uses the client path `ISession.beginSubmission` + `ISession.prompt`, so this route is not called |
 | tab DOM | `.dshwb-root[data-whiteboard=<mainSessionId>]`, `.dshwb-board[data-view=2d\|3d]`, `.dshwb-meta[data-tone=count\|status\|error]` (「N 个图形」/「N 个物体」), `input.dshwb-input`, bar buttons by aria: 撤销 / 导出 / 清空→确认清空 |
 | migration | at activation, `session-whiteboard-*.json` whose child session names a **live** parent is copied to `<parent>.json` (byte copy, only when absent; newest child wins per parent; unreachable parents and orphans are left alone) |
-| tools | `whiteboard_draw` / `whiteboard_3d` / `whiteboard_read` are registered per **main** agent on `agent/created`; `header.origin === 'subagent'` is skipped |
+| tools | `whiteboard_draw` / `whiteboard_3d` / `whiteboard_read` / `whiteboard_look` / `whiteboard_api` are registered per **main** agent on `agent/created`; `header.origin === 'subagent'` is skipped |
 
 ## Harness changes that model C forced
 
-- `scripts/e2e.mjs` is phase-based: `--phase load|headline|say|regress|tools|all`, one
+- `scripts/e2e.mjs` is phase-based: `--phase load|headline|say|regress|tools|look|all`, one
   JSON per run (`--out` defaults to a timestamped name in `.wbdev/shots/`).
 - **Host-side witnesses** now sit next to every browser claim: the board document on
   disk, the state route, and the session log. `sessions/…/session.v4.jsonl.zstd` is a
@@ -519,3 +522,27 @@ Live evidence for this feature set is the v3 run recorded in `design.md` (isolat
 for `debug: 'shadow-only'`, and a second conversation confirming `theme: "dark"` and
 `castShadow.accepted: true`. It was not re-run for the version bump, which changes no code.
 
+## Cross-platform harness (2026-10-29, macOS)
+
+The original sections above describe the maintainer's Windows workstation. The harness now runs
+on a standalone checkout without the sibling `dsh-plugin-side-chat`:
+
+- `scripts/dev.mjs` links only directories that actually carry a `package.json`; profile
+  initialization seeds the whiteboard plugin, and `side-chat` is optional. Use an out-of-tree
+  home when the workspace is sandboxed:
+  `WBDEV_HOME=/tmp/wbdev2 node scripts/dev.mjs setup && WBDEV_HOME=/tmp/wbdev2 node scripts/dev.mjs start`.
+- `scripts/pw.mjs` discovers a `playwright`/`playwright-core` package from `WBDEV_PLAYWRIGHT_DIR`,
+  the workspace `node_modules`, or the npm `_npx` cache; `scripts/e2e.mjs` drives the machine's
+  Chrome (`WBDEV_CHROME_PATH`; macOS default) and passes
+  `--use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader` so the 3D phase has WebGL
+  in headless Chrome.
+- `--phase look` is new: it opens the 画板 tab, has the model draw a 3D ball and call
+  `whiteboard_look`, then asserts (a) a `whiteboard_look` `tool/call` in the main session log,
+  (b) a new PNG under `storages/whiteboard/frames/`, and (c) a valid PNG header with dimensions.
+  Auto-frames can also add PNGs; the tool-call assertion is the authoritative one.
+
+Six phases on macOS (system Chrome, `WBDEV_HOME=/tmp/wbdev2`): `load` 29 PASS, `headline` 12,
+`say` 6, `regress` 20, `tools` 7, `look` 5 — **79 PASS, 0 FAIL**, 0 console/page/http errors.
+`regress` records one `net::ERR_ABORTED` state poll; that is the board's own `AbortController`
+cancelling an in-flight poll, not a product failure. The `tools` phase now asserts all five board
+tools on the main agent and none on the subagent.
