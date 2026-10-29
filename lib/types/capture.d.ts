@@ -68,11 +68,23 @@ export interface CaptureService {
      */
     hasViewer(sessionId: string): boolean;
     /**
-     * Last viewport reported with a frame, for `whiteboard_read` and the API manifest.
+     * Last viewport the panel reported, for `whiteboard_read` and the API manifest.
+     * It comes from the state poll (before any frame) and is refreshed by each
+     * captured answer.
      * @param sessionId - board key.
      * @returns the last known stage size, or undefined.
      */
     lastViewport(sessionId: string): CaptureViewport | undefined;
+    /**
+     * Remember the panel's stage size reported by its ordinary state poll.
+     *
+     * This is what lets `whiteboard_api.current.viewport` be useful before the
+     * first frame. Implausible values are ignored instead of replacing a good
+     * earlier report; the device pixel ratio is clamped to the supported range.
+     * @param sessionId - board key.
+     * @param viewport - the CSS stage size and device pixel ratio.
+     */
+    noteViewport(sessionId: string, viewport: CaptureViewport): void;
     /**
      * Remember the panel's current palette, reported by its state poll.
      * @param sessionId - board key.

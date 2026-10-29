@@ -319,7 +319,9 @@ never turns a successful drawing into a timeout.
 
 **The preset became a manifest.** `src/spec.ts` declares the fields, kinds, view, lights, limits and
 examples once; `src/manifest.ts` turns it into the `whiteboard_api` payload (build, theme, viewport, live
-camera/lights, defaults, palette, design scales, examples). The prompt section shrank to intent and two
+camera/lights, defaults, palette, design scales, examples). The ordinary state poll also carries the
+stage size and DPR (`vw`, `vh`, `dpr`), so `current.viewport` is populated before the first frame;
+implausible query values are ignored, the DPR is clamped, and a later capture still refreshes it. The prompt section shrank to intent and two
 safety rules: draw when asked, and never use a browser as the board's view. The technical numbers are
 queryable and overridable, so they cannot go stale in a prompt.
 

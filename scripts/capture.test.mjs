@@ -95,6 +95,28 @@ test('a request waits for a panel and resolves with its answer', async () => {
   captures.dispose()
 })
 
+test('the state poll reports a viewport before any frame is captured', () => {
+  const captures = createCaptureService(store)
+  const accepted = { width: 901, height: 701, dpr: 2 }
+  captures.noteViewport('session-poll', { width: 901.2, height: 700.8, dpr: 2 })
+  assert.deepEqual(captures.lastViewport('session-poll'), accepted)
+  captures.noteViewport('session-poll', { width: 0, height: 700, dpr: 2 })
+  assert.deepEqual(captures.lastViewport('session-poll'), accepted, 'an implausible width keeps the last good report')
+  captures.noteViewport('session-poll', { width: Number.NaN, height: 700.8, dpr: 2 })
+  assert.deepEqual(captures.lastViewport('session-poll'), accepted, 'NaN never replaces a good report')
+  captures.noteViewport('session-poll', { width: 20_000, height: 700.8, dpr: 2 })
+  assert.deepEqual(captures.lastViewport('session-poll'), accepted, 'an absurd side is ignored')
+  captures.noteViewport('session-poll', { width: 800, height: 600, dpr: 9 })
+  assert.deepEqual(
+    captures.lastViewport('session-poll'),
+    { width: 800, height: 600, dpr: 4 },
+    'the DPR is clamped to the supported range',
+  )
+  captures.noteViewport('session-poll', { width: 800, height: 600, dpr: 0 })
+  assert.deepEqual(captures.lastViewport('session-poll'), { width: 800, height: 600, dpr: 4 }, 'a zero DPR is ignored')
+  captures.dispose()
+})
+
 test('a request with no panel rejects with a readable error', async () => {
   const captures = createCaptureService(store)
   // Keep the test process alive while the service's unref'd deadline fires.

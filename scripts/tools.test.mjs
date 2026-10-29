@@ -137,9 +137,10 @@ const ATTACHMENT = {
  * A capture stub that records every request and answers immediately; frame
  * bytes are not decoded here. `extra` is merged into the answer, so a test can
  * ask for tiles/diff/preview as if the panel returned them.
- * @param {{ extra?: object, fail?: Error }} [behaviour] - canned answer bits or a failure.
+ * @param {{ extra?: object, fail?: Error, viewer?: boolean, viewport?: object }} [behaviour]
+ *   canned answer bits, a failure, viewer presence, or the last polled viewport.
  */
-function captureStub({ extra = {}, fail = undefined, viewer = true } = {}) {
+function captureStub({ extra = {}, fail = undefined, viewer = true, viewport = undefined } = {}) {
   const requests = []
   const request = async (sessionId, options, timeoutMs, requestExtra) => {
     requests.push({ sessionId, options: { ...options }, timeoutMs, extra: requestExtra })
@@ -162,7 +163,7 @@ function captureStub({ extra = {}, fail = undefined, viewer = true } = {}) {
     request,
     captures: {
       hasViewer: () => viewer,
-      lastViewport: () => undefined,
+      lastViewport: () => viewport,
       lastTheme: () => undefined,
       lastAppTheme: () => undefined,
       request,
@@ -781,6 +782,13 @@ test('whiteboard_api can return one section of the contract', async () => {
   assert.ok(parsed.current)
   assert.equal(parsed.ops, undefined)
   assert.equal(parsed.tools, undefined)
+})
+
+test('whiteboard_api reports the polled viewport before a frame is captured', async () => {
+  const viewport = { width: 674, height: 867, dpr: 2 }
+  const { tool } = buildTools({ capture: captureStub({ viewport }) })
+  const parsed = JSON.parse(await tool('whiteboard_api').execute({ section: 'current' }, exec))
+  assert.deepEqual(parsed.current.viewport, viewport)
 })
 
 test('whiteboard_history reports the undo stack', async () => {

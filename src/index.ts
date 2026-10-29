@@ -197,8 +197,15 @@ export function apply(ctx: Context): void {
       return ready.then(() => {
         try {
           // The panel's ordinary state poll is also the cheapest place to learn
-          // which palette it is painting in; the API manifest reports it.
+          // which palette it is painting in and how big its stage is; the API
+          // manifest reports both before any frame has been captured.
           if (theme === 'light' || theme === 'dark') captures.noteTheme(sessionId, theme)
+          const vw = url.searchParams.get('vw')
+          const vh = url.searchParams.get('vh')
+          const dpr = url.searchParams.get('dpr')
+          if (vw !== null && vh !== null && dpr !== null) {
+            captures.noteViewport(sessionId, { width: Number(vw), height: Number(vh), dpr: Number(dpr) })
+          }
           // Memory-only after the first touch, so polling stays cheap. A Session
           // with no board document reads as an empty board; no file is created
           // until the first mutation.

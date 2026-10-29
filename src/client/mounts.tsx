@@ -267,7 +267,10 @@ interface WhiteboardBoardProps {
 function WhiteboardBoard({ sessionId, running, visible, standalone, clear, undo, onPick, t }: WhiteboardBoardProps) {
   // A body the sidebar keeps mounted for a background Session or a collapsed
   // column stops polling until it is on screen again (an unknown answer polls).
-  const { board, stale, canUndo } = useBoard(sessionId, running, visible !== false)
+  // The viewport is a ref so a resize changes the next poll's query without
+  // re-arming the poll interval itself.
+  const stageViewport = useRef<CaptureViewport | undefined>(undefined)
+  const { board, stale, canUndo } = useBoard(sessionId, running, visible !== false, stageViewport)
   const rev = board.rev
   const documentMode = board.mode
   const [view, setView] = useState<BoardMode>(documentMode)
@@ -308,6 +311,9 @@ function WhiteboardBoard({ sessionId, running, visible, standalone, clear, undo,
   /** Latest stage size, for previews that must use the panel's aspect at capture time. */
   const latestSize = useRef(size)
   latestSize.current = size
+  stageViewport.current = stageReady
+    ? { width: size.width, height: size.height, dpr: globalThis.devicePixelRatio || 1 }
+    : undefined
 
   /**
    * Latest board and surface, read by the capture hook at capture time. Keeping

@@ -140,11 +140,23 @@ export interface CaptureService {
    */
   hasViewer(sessionId: string): boolean
   /**
-   * Last viewport reported with a frame, for `whiteboard_read` and the API manifest.
+   * Last viewport the panel reported, for `whiteboard_read` and the API manifest.
+   * It comes from the state poll (before any frame) and is refreshed by each
+   * captured answer.
    * @param sessionId - board key.
    * @returns the last known stage size, or undefined.
    */
   lastViewport(sessionId: string): CaptureViewport | undefined
+  /**
+   * Remember the panel's stage size reported by its ordinary state poll.
+   *
+   * This is what lets `whiteboard_api.current.viewport` be useful before the
+   * first frame. Implausible values are ignored instead of replacing a good
+   * earlier report; the device pixel ratio is clamped to the supported range.
+   * @param sessionId - board key.
+   * @param viewport - the CSS stage size and device pixel ratio.
+   */
+  noteViewport(sessionId: string, viewport: CaptureViewport): void
   /**
    * Remember the panel's current palette, reported by its state poll.
    * @param sessionId - board key.
@@ -268,6 +280,35 @@ function sanitizeOptions(options: CaptureOptions): CaptureOptions {
   return out
 }
 
+/** Largest plausible stage side, in CSS pixels. */
+const MAX_VIEWPORT_SIDE = 10_000
+/** Supported device pixel ratio range; reported values outside it are clamped. */
+const MIN_DEVICE_PIXEL_RATIO = 0.5
+const MAX_DEVICE_PIXEL_RATIO = 4
+
+/**
+ * Validate and normalise a stage viewport from either the poll or an answer.
+ *
+ * The poll is untrusted query input, so non-finite, non-positive and absurd
+ * dimensions must not overwrite the last good report. A DPR outside the range the
+ * renderers support is clamped rather than dropped, because it is still evidence
+ * of the panel's scale.
+ * @param value - candidate viewport, possibly absent.
+ * @returns a copied, rounded viewport or undefined when unusable.
+ */
+function sanitizeViewport(value: CaptureViewport | undefined): CaptureViewport | undefined {
+  if (value === undefined) return undefined
+  const { width, height, dpr } = value
+  if (!Number.isFinite(width) || !Number.isFinite(height) || !Number.isFinite(dpr)) return undefined
+  if (width <= 0 || height <= 0 || dpr <= 0) return undefined
+  if (width > MAX_VIEWPORT_SIDE || height > MAX_VIEWPORT_SIDE) return undefined
+  return {
+    width: Math.round(width),
+    height: Math.round(height),
+    dpr: Math.min(MAX_DEVICE_PIXEL_RATIO, Math.max(MIN_DEVICE_PIXEL_RATIO, dpr)),
+  }
+}
+
 /**
  * Build the capture broker for one plugin instance.
  * @param store - the board store used to stamp each request with the current revision.
@@ -387,6 +428,7 @@ export function createCaptureService(store: BoardStore): CaptureService {
     // frame itself (which is just a PNG) is still delivered.
     const diff = sanitizeCaptureDiff(answer.diff)
     const tiles = sanitizeCaptureTiles(answer.tiles)
+    const viewport = sanitizeViewport(answer.viewport)
     const preview = answer.preview === true
     const accepted: CaptureAnswer = {
       requestId: answer.requestId,
@@ -395,7 +437,7 @@ export function createCaptureService(store: BoardStore): CaptureService {
       height: answer.height,
       mode: answer.mode,
       ...(answer.camera === undefined ? {} : { camera: answer.camera }),
-      ...(answer.viewport === undefined ? {} : { viewport: answer.viewport }),
+      ...(viewport === undefined ? {} : { viewport }),
       ...(diff === undefined ? {} : { diff }),
       ...(tiles === undefined ? {} : { tiles }),
       ...(preview ? { preview } : {}),
@@ -415,6 +457,10 @@ export function createCaptureService(store: BoardStore): CaptureService {
     submit,
     hasViewer,
     lastViewport: sessionId => viewports.get(sessionId),
+    noteViewport(sessionId, viewport): void {
+      const accepted = sanitizeViewport(viewport)
+      if (accepted !== undefined) viewports.set(sessionId, accepted)
+    },
     noteTheme(sessionId, theme): void {
       themes.set(sessionId, theme)
     },

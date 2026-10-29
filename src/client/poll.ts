@@ -23,7 +23,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react'
-import { STATE_PATH, type WhiteboardSnapshot } from '../shared.ts'
+import { STATE_PATH, type CaptureViewport, type WhiteboardSnapshot } from '../shared.ts'
 import { applyClear, emptyBoard, isBoardState, type BoardMode, type BoardState } from '../scene.ts'
 import { currentTheme } from './palette.ts'
 
@@ -119,15 +119,27 @@ export interface BoardPoll {
   canUndo: boolean
 }
 
+/** The live stage size the state poll reports; a ref, so resizes do not re-arm the poll. */
+export interface BoardViewportSource {
+  readonly current: CaptureViewport | undefined
+}
+
 /**
  * Poll one board and return its current document.
  * @param sessionId - main Session id that owns the board.
  * @param running - whether the main agent is running right now.
  * @param active - whether this tab is the one on screen; a background or
  *   collapsed tab keeps its state but stops fetching until it is shown again.
+ * @param viewport - latest measured stage size, sent with each poll so the API
+ *   manifest knows the panel size before the first capture.
  * @returns the current board, a staleness flag, and whether undo is available.
  */
-export function useBoard(sessionId: string, running: boolean, active = true): BoardPoll {
+export function useBoard(
+  sessionId: string,
+  running: boolean,
+  active = true,
+  viewport?: BoardViewportSource,
+): BoardPoll {
   const [state, setState] = useState<BoardPoll>(() => ({ board: emptyBoard(), stale: false, canUndo: false }))
   /**
    * Revision of the board currently in state. Equality is tested against this,
@@ -204,6 +216,12 @@ export function useBoard(sessionId: string, running: boolean, active = true): Bo
       const next = new AbortController()
       controller = next
       const query = new URLSearchParams({ sessionId, theme: currentTheme() })
+      const stage = viewport?.current
+      if (stage !== undefined) {
+        query.set('vw', String(Math.max(1, Math.round(stage.width))))
+        query.set('vh', String(Math.max(1, Math.round(stage.height))))
+        query.set('dpr', String(stage.dpr))
+      }
       globalThis.fetch(`${route(STATE_PATH)}?${query}`, { signal: next.signal, cache: 'no-store' })
         .then(async (response) => {
           if (!response.ok) throw new Error(`HTTP ${response.status}`)

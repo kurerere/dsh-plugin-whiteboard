@@ -335,7 +335,7 @@ belong to the main agent only.
 | contract | value |
 |---|---|
 | board document | `<dsh home>/storages/whiteboard/<mainSessionId>.json`, shape `{ version: 1, rev, board }` where `board` is `{ rev, mode, canvas: { shapes[] }, scene: { objects[] } }` |
-| state | `GET /api/whiteboard.state?sessionId=` → `{ rev, board, canUndo }` |
+| state | `GET /api/whiteboard.state?sessionId=&theme=&vw=&vh=&dpr=` → `{ rev, board, canUndo }`; `theme` and the stage size are side-channel reports, not part of the response (`noteViewport` keeps a good earlier value when a query is malformed) |
 | mutations | `POST /api/whiteboard.clear { sessionId, mode? }`, `POST /api/whiteboard.undo { sessionId }` → `{ accepted, rev, canUndo, reverted }` |
 | say (fallback) | `POST /api/whiteboard.say { sessionId, text, requestId }` — the tab's composer normally uses the client path `ISession.beginSubmission` + `ISession.prompt`, so this route is not called |
 | tab DOM | `.dshwb-root[data-whiteboard=<mainSessionId>]`, `.dshwb-board[data-view=2d\|3d]`, `.dshwb-meta[data-tone=count\|status\|error]` (「N 个图形」/「N 个物体」), `input.dshwb-input`, bar buttons by aria: 撤销 / 导出 / 清空→确认清空 |
