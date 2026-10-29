@@ -102,6 +102,10 @@ the same readable error as a plain look:
 | `whiteboard_look({diffAgainst: 'previous'})` | a before / after / changed sheet. `previous` and `rev:<n>` re-render a document from the in-memory undo history with the current camera; a 6–16 character frame hash compares that stored PNG instead. The result carries `diff`: changed pixels, changed ratio, pixel bounds when anything changed, and a one-line note. A diff compares one surface only; an empty earlier board counts as the current surface. |
 | `whiteboard_draw` / `whiteboard_3d` with `dryRun: true` | the batch as an uncommitted document: no store mutation, no undo entry, no revision bump. The preview is rendered in the panel and returned with `checks` and `warnings`; a committed batch keeps its normal behaviour. |
 
+A contact sheet or a diff asks for a specific surface, not for whatever happens to be on screen. If the
+board is pinned to 2D (or the panel build is older than the modes), the request fails with "switch the
+panel to 3D and retry" instead of quietly saving a plain frame whose summary lies about what it is.
+
 The extra views never disturb the live stage: the panel renders them offscreen (a hidden 3D preview
 stage, a static 2D painter) and the camera, scroll position and visible frame stay exactly as they were.
 

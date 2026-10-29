@@ -312,40 +312,27 @@ function sameAspect(before: { width: number; height: number }, after: { width: n
  *
  * A document baseline is re-rendered from the saved document with the current
  * view, the current size and the current viewport, so it is comparable by
- * construction — unless the two documents are of different surfaces, which the
- * tools reject but a stale request may still carry. A stored frame cannot prove
- * it was taken from the same view, so every mismatch that would put unrelated
- * pixels in the red mask is listed in the note instead of being hidden.
+ * construction (the caller rejects a baseline from another surface first). A
+ * stored frame cannot prove it was taken from the same view, so every mismatch
+ * that would put unrelated pixels in the red mask is listed in the note instead
+ * of being hidden.
  * @param frame - the frame that was just captured.
  * @param baseline - what it was compared with.
  * @returns the diff metadata the answer carries.
  */
 function baselineMeta(frame: CaptureFrame, baseline: CaptureBaseline): DiffMeta {
   if (baseline.kind === 'document') {
-    if (baseline.board.mode === frame.mode) {
-      return {
-        label: baseline.label,
-        rev: baseline.rev,
-        kind: 'document',
-        comparable: true,
-        note: `Compared with ${baseline.label}, re-rendered from the saved document with the same view,`
-          + ' size and viewport, so the changed pixels are content changes.',
-      }
-    }
     return {
       label: baseline.label,
       rev: baseline.rev,
       kind: 'document',
-      comparable: false,
-      note: `Approximate comparison with ${baseline.label}: that document shows the`
-        + ` ${surfaceName(baseline.board.mode)} surface and this frame shows the ${surfaceName(frame.mode)} one.`,
+      comparable: true,
+      note: `Compared with ${baseline.label}, re-rendered from the saved document with the same view,`
+        + ' size and viewport, so the changed pixels are content changes.',
     }
   }
 
   const problems: string[] = []
-  if (baseline.mode !== frame.mode) {
-    problems.push(`it shows the ${surfaceName(baseline.mode)} surface and this frame shows the ${surfaceName(frame.mode)} one`)
-  }
   if (frame.mode === '3d') {
     if (baseline.camera === undefined) {
       problems.push('it does not record the camera it was taken with')
@@ -406,6 +393,13 @@ async function diffAgainst(
   options: CaptureOptions,
   render: CaptureSource['renderBaseline'],
 ): Promise<DiffResult> {
+  const baselineMode = baseline.kind === 'document' ? baseline.board.mode : baseline.mode
+  if (baselineMode !== frame.mode) {
+    throw new Error(
+      `diffAgainst ${baseline.label} is a ${surfaceName(baselineMode)} baseline, but the 画板 panel is showing `
+      + `the ${surfaceName(frame.mode)} surface; switch the panel to ${surfaceName(baselineMode)} and retry`,
+    )
+  }
   const meta = baselineMeta(frame, baseline)
   if (baseline.kind === 'image') {
     const stored: CaptureFrame = {

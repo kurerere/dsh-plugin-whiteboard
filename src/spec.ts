@@ -1785,10 +1785,11 @@ export const HINTS: readonly string[] = [
   'Call whiteboard_look after drawing to check the actual pixels — text overflow, overlaps and 3D '
     + 'framing — instead of assuming.',
   'Contact sheets are 3D-only: debug "per-light" (one tile per shadow-casting light) and angles '
-    + '"turntable" (four yaw views) never apply to the 2D canvas.',
+    + '"turntable" (four yaw views) never apply to the 2D canvas. The 画板 panel must be showing 3D when '
+    + 'you ask; a pinned 2D panel answers this request with an error, not a plain frame.',
   'diffAgainst compares documents from the in-memory undo history ("previous", "rev:<n>") or a saved '
-    + 'frame hash; the baseline must be on the same surface as the board, and the history resets when the '
-    + 'Host restarts.',
+    + 'frame hash; the baseline and the panel must both show the board\'s surface, and the history resets '
+    + 'when the Host restarts.',
   'A dry run (dryRun: true) renders inside the open 画板 panel and never commits: no mutation, no undo '
     + 'entry, no revision bump; the preview frame is saved, attached and returned with its checks.',
   'Keep a 48-unit margin on the 2D canvas; body text ≥14 keeps the board readable at panel size.',

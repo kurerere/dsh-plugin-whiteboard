@@ -335,6 +335,43 @@ test('whiteboard_look accepts the turntable contact sheet', async () => {
   assert.match(value.summary, /4 views/)
 })
 
+test('a per-light sheet from a pinned 2D panel is refused and never saved', async () => {
+  const { tool, frames } = buildTools({ capture: captureStub({ extra: { mode: '2d' } }) })
+  await assert.rejects(tool('whiteboard_look').execute({ debug: 'per-light' }, exec), (error) => {
+    assert.match(error.message, /needs a 3D contact sheet/)
+    assert.match(error.message, /showing the 2D surface/)
+    assert.match(error.message, /nothing was saved/)
+    return true
+  })
+  assert.equal(frames.saved.length, 0, 'no misleading 2D frame is persisted')
+})
+
+test('a contact sheet without captions is refused', async () => {
+  const { tool } = buildTools({ capture: captureStub() })
+  await assert.rejects(tool('whiteboard_look').execute({ angles: 'turntable' }, exec), (error) => {
+    assert.match(error.message, /without contact-sheet captions/)
+    return true
+  })
+})
+
+test('a diff from a pinned 2D panel is refused and never saved', async () => {
+  const { tool, frames } = buildTools({ capture: captureStub({ extra: { mode: '2d' } }) })
+  await assert.rejects(tool('whiteboard_look').execute({ diffAgainst: 'previous' }, exec), (error) => {
+    assert.match(error.message, /needs a 3D comparison/)
+    assert.match(error.message, /showing the 2D surface/)
+    return true
+  })
+  assert.equal(frames.saved.length, 0)
+})
+
+test('a diff without statistics is refused', async () => {
+  const { tool } = buildTools({ capture: captureStub() })
+  await assert.rejects(tool('whiteboard_look').execute({ diffAgainst: 'previous' }, exec), (error) => {
+    assert.match(error.message, /without diff statistics/)
+    return true
+  })
+})
+
 test('diffAgainst previous builds a document baseline from the undo history', async () => {
   const diff = {
     kind: 'document',
@@ -374,7 +411,17 @@ test('diffAgainst previous relabels an empty earlier document to the current sur
     canvas: { background: null, grid: true, shapes: [] },
     scene: { ...board.scene, objects: [] },
   }
-  const { tool, capture } = buildTools({ store: storeWith({ previous: () => ({ rev: 6, board: empty }) }) })
+  const { tool, capture } = buildTools({
+    store: storeWith({ previous: () => ({ rev: 6, board: empty }) }),
+    capture: captureStub({
+      extra: {
+        diff: {
+          kind: 'document', label: 'previous', rev: 6, changedPixels: 0, changedRatio: 0,
+          comparable: true, note: 'no visible change',
+        },
+      },
+    }),
+  })
   await tool('whiteboard_look').execute({ diffAgainst: 'previous' }, exec)
   const request = capture.requests[0]
   assert.equal(request.extra.baseline.board.mode, '3d', 'an empty baseline follows the surface being compared')
@@ -390,6 +437,14 @@ test('diffAgainst rev:N resolves a retained revision', async () => {
         return rev === 6 ? { rev: 6, board: previousBoard } : undefined
       },
     }),
+    capture: captureStub({
+      extra: {
+        diff: {
+          kind: 'document', label: 'rev:6', rev: 6, changedPixels: 0, changedRatio: 0,
+          comparable: true, note: 'no visible change',
+        },
+      },
+    }),
   })
   const value = await tool('whiteboard_look').execute({ diffAgainst: 'rev:6' }, exec)
   assert.deepEqual(calls, [6])
@@ -401,7 +456,17 @@ test('diffAgainst rev:N resolves a retained revision', async () => {
 
 test('diffAgainst a frame hash builds an image baseline', async () => {
   const frames = makeFrames([IMAGE_RECORD])
-  const { tool, capture } = buildTools({ frames })
+  const { tool, capture } = buildTools({
+    frames,
+    capture: captureStub({
+      extra: {
+        diff: {
+          kind: 'image', label: `frame:${IMAGE_RECORD.hash}`, rev: 5, changedPixels: 0, changedRatio: 0,
+          comparable: true, note: 'no visible change',
+        },
+      },
+    }),
+  })
   await tool('whiteboard_look').execute({ diffAgainst: 'ab12cd' }, exec)
   const baseline = capture.requests[0].extra.baseline
   assert.equal(baseline.kind, 'image')

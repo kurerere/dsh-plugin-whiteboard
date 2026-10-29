@@ -591,7 +591,17 @@ disk alone, and `whiteboard_look({diffAgainst: '<6–16 hex prefix>'})` resolves
   are never touched. The hidden engine is created once per mounted tab and disposed with it, so a
   background or collapsed tab body holds no extra WebGL context.
 - A 2D preview goes through the static painter `renderBoardFrame(canvas, options, size?)` in
-  `render2d.tsx` (no appear animation), which is also the 2D document baseline.
+  `render2d.tsx` (no appear animation), which is also the 2D document baseline. A 3D preview passes the
+  panel's CSS size / dpr to `renderDocument`, so its output follows the panel aspect rather than the
+  hidden 960×600 box; the answer still omits `viewport`, so a preview cannot overwrite the real panel
+  size reported by `whiteboard_read`.
+- **Surface pinning is refused, not degraded.** `src/client/mounts.tsx` throws when `debug:'per-light'`
+  or `angles:'turntable'` is requested while the displayed surface is 2D, and `src/client/capture.ts`
+  throws when a diff baseline's surface differs from the captured frame. The Host repeats the check on
+  the answer (`answer.mode`, plus `tiles` / `diff` presence) before `frames.save`, so an older panel that
+  ignores the options cannot persist a plain frame labelled as a sheet. Unit tests pin both refusals; the
+  live harness does not pin the panel because that needs both surfaces seeded, which the deep phase does
+  not do.
 - `src/client/diff.ts` decodes both PNGs, scales the before frame to the after size, compares RGB with a
   per-channel delta ≤ 8 to absorb antialiasing, and composes a **3-column** sheet: `before`, `after`,
   `changed` (dimmed after + red changed pixels + bounding box + `N% changed`). Sheet output respects

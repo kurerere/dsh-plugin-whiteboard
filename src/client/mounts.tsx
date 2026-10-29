@@ -397,6 +397,16 @@ function WhiteboardBoard({ sessionId, running, visible, standalone, clear, undo,
       }
       return renderBoardFrame(preview.canvas, options)
     }
+    // A contact sheet is a property of the 3D scene, not of the panel's current
+    // surface. If the user pinned the board to 2D, a plain 2D frame would be
+    // returned while the tool summary still talked about per-light/turntable
+    // tiles — so fail loudly and tell the model which way to fix it.
+    if ((options.debug === 'per-light' || options.angles === 'turntable') && latestSurface.current !== '3d') {
+      throw new Error(
+        'the per-light / turntable contact sheet is 3D-only, and the 画板 panel is showing the 2D canvas; '
+        + 'switch the panel to 3D and retry',
+      )
+    }
     if (latestSurface.current === '3d') {
       const stage = capture3d.current
       if (stage === undefined) throw new Error('the 3D stage is not ready')

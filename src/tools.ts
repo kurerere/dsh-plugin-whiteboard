@@ -1945,6 +1945,25 @@ export function createBoardTools(
       }
       const extra: { baseline?: CaptureBaseline } = resolved === undefined ? {} : { baseline: resolved.baseline }
       const answer = await services.captures.request(sessionId, options, 4_000, extra)
+      // The panel captures what it shows, so a pinned 2D surface (or an older
+      // panel that ignores the new options) can answer a 3D request with a plain
+      // frame. Refuse that instead of saving a picture whose summary lies about
+      // what it is.
+      if ((perLight || turntable) && (answer.mode !== '3d' || answer.tiles === undefined || answer.tiles.length === 0)) {
+        const reason = answer.mode !== '3d'
+          ? `the 画板 panel is showing the ${answer.mode.toUpperCase()} surface`
+          : 'the panel returned a plain frame without contact-sheet captions'
+        throw new Error(`${LOOK_TOOL}: ${perLight ? 'debug "per-light"' : 'angles "turntable"'} needs a 3D contact `
+          + `sheet, but ${reason}. Switch the 画板 panel to 3D (or drop the option) and retry; nothing was saved.`)
+      }
+      if (resolved !== undefined && (answer.mode !== resolved.mode || answer.diff === undefined)) {
+        const reason = answer.mode !== resolved.mode
+          ? `the 画板 panel is showing the ${answer.mode.toUpperCase()} surface`
+          : 'the panel returned a plain frame without diff statistics'
+        throw new Error(`${LOOK_TOOL}: diffAgainst ${resolved.label} needs a ${resolved.mode.toUpperCase()} comparison, `
+          + `but ${reason}. Switch the 画板 panel to ${resolved.mode.toUpperCase()} (or drop diffAgainst) and retry; `
+          + 'nothing was saved.')
+      }
       // A contact sheet is still a look; only a diff sheet is a comparison.
       const source = resolved === undefined ? 'look' : 'diff'
       const saved = await services.frames.save(sessionId, answer.png, {

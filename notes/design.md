@@ -398,9 +398,17 @@ requests and the draw tools gained a preview. The product rules — not the extr
   live stage must not visibly change: no teardown/restore flash, no camera jump, no scroll.
 - **The preview renders offscreen in the open tab.** A dry run hands the panel the hypothetical document
   as `CaptureRequest.preview`. A 2D preview goes through a static painter with no appear animation; a 3D
-  preview goes through a **hidden fixed 960×600 3D stage** that exists exactly once, so the visible
-  surface and its orbit are untouched. Two WebGL contexts exist while the tab is open; that is the
-  accepted cost of not having a second rendering path.
+  preview goes through a **hidden fixed 960×600 3D stage** that is mounted only while the tab can answer a
+  capture (`stageReady && visible !== false`), so the visible surface and its orbit are untouched. The
+  preview is rendered at the panel's own output size, not the hidden box's aspect, so the model sees the
+  framing a commit would produce. One extra WebGL context costs the open 2D tab; a visible 3D tab has the
+  second one it already needed. That is the accepted cost of not having a separate rendering path.
+- **A sheet or a diff needs the surface it names.** The panel captures what it shows; a request for a
+  3D-only contact sheet while the user pinned the board to 2D must not degrade into a plain 2D frame with
+  a summary that still says "per-light". The client refuses both, and the Host independently verifies the
+  answer (`mode` plus `tiles` / `diff` presence) before saving anything; the readable error says to switch
+  the panel to 3D. The same rule rejects a baseline whose surface differs from the captured frame, rather
+  than producing a "not comparable" sheet of unrelated pixels.
 - **Dry run never commits.** No store mutation, no undo entry, no revision bump. The preview PNG is saved
   and indexed with `source: 'preview'`, `checks` / `warnings` describe the hypothetical board, and the
   result line says `nothing was committed`. A dry run with no panel is an error (unlike a normal draw,
@@ -411,9 +419,10 @@ requests and the draw tools gained a preview. The product rules — not the extr
   the latest mutation; `rev:<n>` is a retained document whose own `board.rev` matches. A 6–16 character
   frame hash resolves through the frame index and compares two stored images instead; that comparison is
   marked `comparable: false` with a note when the camera or aspect ratio differs. The baseline surface
-  must equal the current `board.mode`, otherwise the call errors instead of comparing a 2D canvas with a
-  3D scene — except that an entirely empty earlier board is surface-agnostic and follows the current
-  surface, so the first 3D batch on a fresh board can still be compared with "empty before this edit".
+  must equal the current `board.mode` **and** the frame the panel actually captured, otherwise the call
+  errors instead of comparing a 2D canvas with a 3D scene — except that an entirely empty earlier board
+  is surface-agnostic and follows the current surface, so the first 3D batch on a fresh board can still
+  be compared with "empty before this edit".
   The answer carries `CaptureDiff` (`kind`, `label`, `rev`, `changedPixels`, `changedRatio`,
   optional `bounds` in new-frame pixels, `comparable`, `note`) and the result line names it
   (`diff against previous: 2.3% changed`, or `diff against rev:12: …` for a revision).
