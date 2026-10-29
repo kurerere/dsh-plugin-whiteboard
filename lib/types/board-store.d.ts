@@ -79,6 +79,27 @@ export interface BoardStore {
         kind: UndoKind;
     }[];
     /**
+     * The document before the latest mutation: the newest retained undo step.
+     *
+     * A `diffAgainst:'previous'` look re-renders it with the current camera, so
+     * the model compares board content instead of also comparing an orbit.
+     * Memory only: `undefined` after a Host restart, when the history is empty,
+     * when the board was replaced by {@link newBoard}, and after {@link dispose}.
+     * @param sessionId - whiteboard Session id (the board key).
+     * @returns the pre-mutation snapshot, or `undefined` when there is none.
+     */
+    previous(sessionId: string): BoardSnapshot | undefined;
+    /**
+     * A retained document whose own `board.rev` equals `rev`.
+     *
+     * This is how `diffAgainst:'rev:<n>'` finds the document to re-render; only
+     * the bounded in-memory history is searched, never the disk.
+     * @param sessionId - whiteboard Session id (the board key).
+     * @param rev - the revision to find (a retained step's own revision).
+     * @returns the matching snapshot, newest first, or `undefined` when pruned.
+     */
+    revision(sessionId: string, rev: number): BoardSnapshot | undefined;
+    /**
      * Make sure a board document exists, creating an empty one when absent.
      * An existing document is never overwritten. Resets that board's undo history:
      * a replaced board is not the same board.

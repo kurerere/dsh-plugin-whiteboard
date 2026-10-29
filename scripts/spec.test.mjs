@@ -320,6 +320,9 @@ test('the limits pin the numbers tools.ts actually enforces', () => {
     path: 4000,
     points: 400,
     coordLimit: 20000,
+    turntableViews: 4,
+    perLightTiles: 4,
+    answerBytes: 8_000_000,
   })
 
   // The runtime caps live in tools.ts and are not exported; pin the source so a
@@ -347,6 +350,74 @@ test('the limits pin the numbers tools.ts actually enforces', () => {
     assert.equal(TOOL_SPECS[role].name, TOOL_NAMES[role])
     assert.ok(TOOL_SPECS[role].purpose.length > 20, `${role}: purpose`)
   }
+})
+
+test('the look tool exposes the deep capture modes and the diff selector', () => {
+  const definitions = createBoardTools(store, Promise.resolve())
+  const look = definitions.find(definition => definition.name === LOOK_TOOL)
+  assert.ok(look, 'whiteboard_look is registered')
+  const properties = look.parameters.properties
+  assert.deepEqual([...properties.debug.enum], ['lit', 'shadow-only', 'per-light'], 'debug gains per-light')
+  assert.equal((properties.debug.description ?? '').length > 10, true, 'debug has a description')
+  assert.deepEqual([...properties.angles.enum], ['default', 'turntable'], 'angles is the turntable switch')
+  assert.equal((properties.angles.description ?? '').length > 10, true, 'angles has a description')
+  assert.equal(properties.diffAgainst.type, 'string', 'diffAgainst is a selector string')
+  assert.ok((properties.diffAgainst.description ?? '').length > 20, 'diffAgainst explains its forms')
+  assert.match(properties.diffAgainst.description, /previous/)
+  assert.match(properties.diffAgainst.description, /rev:/)
+  assert.match(properties.diffAgainst.description, /hash/i)
+})
+
+test('draw and 3d expose dryRun, and the limits pin the sheet caps', () => {
+  const definitions = createBoardTools(store, Promise.resolve())
+  for (const name of [DRAW_TOOL, SCENE_TOOL]) {
+    const tool = definitions.find(definition => definition.name === name)
+    assert.ok(tool, `${name} is registered`)
+    assert.equal(tool.parameters.properties.dryRun.type, 'boolean', `${name}.dryRun is a boolean`)
+    assert.ok(
+      (tool.parameters.properties.dryRun.description ?? '').length > 10,
+      `${name}.dryRun has a description the model can act on`,
+    )
+  }
+  assert.equal(LIMITS.turntableViews, 4, 'a turntable sheet has four views')
+  assert.equal(LIMITS.perLightTiles, 4, 'a per-light sheet has at most one tile per light')
+  assert.equal(LIMITS.answerBytes, 8_000_000, 'one capture answer is capped at 8 MB')
+  assert.equal(buildManifest({}).limits.turntableViews, LIMITS.turntableViews)
+  assert.equal(buildManifest({}).limits.perLightTiles, LIMITS.perLightTiles)
+  assert.equal(buildManifest({}).limits.answerBytes, LIMITS.answerBytes)
+})
+
+test('the tool purposes advertise the new modes', () => {
+  assert.match(TOOL_SPECS.look.purpose, /per-light/)
+  assert.match(TOOL_SPECS.look.purpose, /turntable/)
+  assert.match(TOOL_SPECS.look.purpose, /diff/i)
+  for (const role of ['draw', 'scene3d']) assert.match(TOOL_SPECS[role].purpose, /dry.?run/i, `${role}: purpose mentions dryRun`)
+})
+
+test('the examples document a diff look and a dry-run draw', () => {
+  assert.equal(EXAMPLES.diffLook.tool, TOOL_NAMES.look, 'diffLook looks')
+  assert.equal(EXAMPLES.diffLook.accepted, true)
+  assert.equal(EXAMPLES.diffLook.args.diffAgainst, 'previous')
+  assert.equal(EXAMPLES.diffLook.args.ops, undefined, 'a look call carries no ops')
+  assert.ok(EXAMPLES.diffLook.note.length > 20)
+  assert.equal(EXAMPLES.dryRun.tool, TOOL_NAMES.draw, 'dryRun draws')
+  assert.equal(EXAMPLES.dryRun.accepted, true)
+  assert.equal(EXAMPLES.dryRun.args.dryRun, true)
+  assert.ok(Array.isArray(EXAMPLES.dryRun.args.ops) && EXAMPLES.dryRun.args.ops.length > 0)
+  const manifest = buildManifest({})
+  assert.equal(manifest.examples.diffLook.tool, TOOL_NAMES.look, 'the manifest copies the diff example')
+  assert.equal(manifest.examples.dryRun.args.dryRun, true, 'the manifest copies the dry-run example')
+})
+
+test('the hints explain contact sheets, the memory diff and the dry run', () => {
+  const hints = buildManifest({}).hints
+  assert.deepEqual(hints, [...HINTS], 'the manifest publishes the spec hints verbatim')
+  assert.ok(hints.some(hint => /contact.?sheet/i.test(hint) && /3D/i.test(hint)), 'a hint says contact sheets are 3D-only')
+  assert.ok(
+    hints.some(hint => /diffAgainst|diff/i.test(hint) && /memory|history/i.test(hint)),
+    'a hint says a diff comes from the in-memory history',
+  )
+  assert.ok(hints.some(hint => /dry.?run/i.test(hint) && /commit/i.test(hint)), 'a hint says a dry run never commits')
 })
 
 test('the text limit is 280 characters, not the shipped 40-character hint', () => {
@@ -445,7 +516,14 @@ test('the manifest is a complete, secret-free contract for an empty board', () =
   for (const example of Object.values(manifest.examples)) {
     assert.ok(knownTools.has(example.tool), `example names an unknown tool ${example.tool}`)
     assert.ok(example.note.length > 20)
-    assert.ok(Array.isArray(example.args.ops) && example.args.ops.length > 0)
+    if (example.tool === TOOL_NAMES.look) {
+      // A look call takes no ops; it names one of the explicit capture modes.
+      assert.equal(example.args.ops, undefined, 'a look example must not carry ops')
+      const selector = ['diffAgainst', 'debug', 'angles', 'mode', 'overlay'].find(name => example.args[name] !== undefined)
+      assert.ok(selector !== undefined, 'a look example must name a capture mode')
+    } else {
+      assert.ok(Array.isArray(example.args.ops) && example.args.ops.length > 0)
+    }
     assert.doesNotThrow(() => JSON.stringify(example.args))
   }
   assert.equal(manifest.examples.fixShadow.accepted, true)

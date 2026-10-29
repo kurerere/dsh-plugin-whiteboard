@@ -83,6 +83,12 @@ export declare const LIMITS: {
     readonly points: 400;
     /** Hard plausibility bound on any single 2D coordinate (`±20000`). */
     readonly coordLimit: 20000;
+    /** Views composed into one `angles: "turntable"` contact sheet (3D only). */
+    readonly turntableViews: 4;
+    /** Tiles composed into one `debug: "per-light"` contact sheet (at most one per light). */
+    readonly perLightTiles: 4;
+    /** Largest capture answer the Host accepts, in bytes (8 MB). */
+    readonly answerBytes: 8000000;
 };
 /** The primitive shape of a wire field. */
 export type FieldType = 'number' | 'integer' | 'string' | 'boolean' | 'array' | 'object';
@@ -281,8 +287,10 @@ export interface ToolCallExample {
     /** The arguments object, ready to send. */
     args: JsonValue;
 }
-/** The three examples every manifest carries. */
-export declare const EXAMPLES: Readonly<Record<'draw' | 'scene3d' | 'fixShadow', ToolCallExample>>;
+/** Roles of the copyable examples every manifest carries. */
+export type ExampleRole = 'draw' | 'scene3d' | 'fixShadow' | 'diffLook' | 'dryRun';
+/** The copyable tool calls every manifest carries. */
+export declare const EXAMPLES: Readonly<Record<ExampleRole, ToolCallExample>>;
 /** Short, load-bearing rules the manifest repeats to the model. */
 export declare const HINTS: readonly string[];
 /** Options shared by both parameter builders. */

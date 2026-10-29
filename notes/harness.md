@@ -344,8 +344,8 @@ belong to the main agent only.
 
 ## Harness changes that model C forced
 
-- `scripts/e2e.mjs` is phase-based: `--phase load|headline|say|regress|tools|look|all`, one
-  JSON per run (`--out` defaults to a timestamped name in `.wbdev/shots/`).
+- `scripts/e2e.mjs` is phase-based: `--phase load|headline|say|regress|tools|look|deep|dryrun|all`,
+  one JSON per run (`--out` defaults to a timestamped name in `.wbdev/shots/`).
 - **Host-side witnesses** now sit next to every browser claim: the board document on
   disk, the state route, and the session log. `sessions/…/session.v4.jsonl.zstd` is a
   **concatenation of zstd frames** (one frame per flush); `zstdDecompressSync` decodes a
@@ -546,3 +546,116 @@ Six phases on macOS (system Chrome, `WBDEV_HOME=/tmp/wbdev2`): `load` 29 PASS, `
 `regress` records one `net::ERR_ABORTED` state poll; that is the board's own `AbortController`
 cancelling an in-flight poll, not a product failure. The `tools` phase now asserts all seven board
 tools on the main agent and none on the subagent.
+
+## Deep look + dry run (v4): protocol, storage and two more phases
+
+### What crosses the wire
+
+The panel owns pixels, so a deep capture is still one request/one answer; the additions are optional
+fields on the existing routes.
+
+| direction | field | meaning |
+|---|---|---|
+| request | `baseline?: CaptureBaseline` | what to compare against. `{kind:'document', rev, label, board}` is re-rendered by the panel with the **current** camera; `{kind:'image', rev, label, png, width, height, mode, camera?}` is a stored frame to compare pixel-for-pixel. |
+| request | `preview?: BoardState` | the uncommitted document a dry run wants rendered. The answer reports the *preview document's* own size/mode, not the live surface. |
+| request | `options.debug: 'per-light'` / `options.angles: 'turntable'` | contact-sheet requests; `sanitizeOptions` keeps them instead of dropping an unknown enum. |
+| answer | `diff?: CaptureDiff` | `kind`, `label`, `rev`, `changedPixels`, `changedRatio` (0..1), optional `bounds` in **new-frame** pixels, `comparable`, `note`. `png` is then the 3-panel sheet, not a plain frame. |
+| answer | `tiles?: string[]` | captions of a contact sheet (`#2 directional 1.6`, `0°`, …); at most 8 survive validation. |
+| answer | `preview?: true` | the frame renders an uncommitted dry-run document. |
+
+`POST /api/whiteboard.capture.frame` parses these three answer fields behind the existing 8 MB PNG and
+size checks; a malformed optional field is **dropped, not a frame rejection**, so a panel bug cannot
+cost a good picture. Nothing new is trusted from the client.
+
+### The frame index on disk
+
+`<dsh home>/storages/whiteboard/frames/<session>/`
+
+- `<hash>.png` — unchanged content-addressed frames (`sha256` prefix 16 hex; identical pixels reuse one
+  file).
+- `index.json` — newest-first records, at most 64: `hash`, `path`, `bytes`, ISO `at`, `width`, `height`,
+  `mode`, `rev`, `source` (`look` / `auto` / `preview` / `diff`), optional `camera`, optional `options`.
+  Written atomically (temp + rename, `0600`) and serialised per session; a failed index write is logged
+  and does not fail the save. The `save` that evicts a record also deletes its PNG.
+
+The index is the e2e witness: a `look` sheet, a `diff` sheet and a `preview` frame can be told apart from
+disk alone, and `whiteboard_look({diffAgainst: '<6–16 hex prefix>'})` resolves through `byHash`
+(case-insensitive, `list` is newest first, `prune(keep)` reports how many records it dropped).
+
+### The hidden preview stage
+
+- `src/client/mounts.tsx` mounts a fixed 960×600, off-screen, `visibility:hidden`,
+  `pointer-events:none` 3D stage (`.dshwb-previewStage`) with its own `captureRef` whenever the tab can
+  answer a capture (`stageReady && visible !== false`), whether the visible surface is 2D or 3D. It
+  renders a 3D `preview` document and a 3D diff baseline; the visible stage's orbit, scroll and pixels
+  are never touched. The hidden engine is created once per mounted tab and disposed with it, so a
+  background or collapsed tab body holds no extra WebGL context.
+- A 2D preview goes through the static painter `renderBoardFrame(canvas, options, size?)` in
+  `render2d.tsx` (no appear animation), which is also the 2D document baseline.
+- `src/client/diff.ts` decodes both PNGs, scales the before frame to the after size, compares RGB with a
+  per-channel delta ≤ 8 to absorb antialiasing, and composes a **3-column** sheet: `before`, `after`,
+  `changed` (dimmed after + red changed pixels + bounding box + `N% changed`). Sheet output respects
+  `maxWidth` as the **total** width for contact sheets; a diff sheet is three columns between 720 and
+  1800 px wide, so each panel keeps the captured frame's aspect. `overlay:'ids'` applies inside each
+  contact-sheet tile and in a diff pair (a viewport hint makes the re-rendered baseline use the live
+  label scale), and a contact sheet is 2 columns (4 turntable views → 2×2; one per-light tile per light).
+
+### `--phase deep`
+
+```sh
+node scripts/dev.mjs start
+node scripts/e2e.mjs --phase deep --headed      # add --deep-prompt "…" to replace the prompt
+```
+
+Prompt (a single line; `--deep-prompt` overrides it):
+
+```
+在画板上画一个简单的 3D 场景：一个球和一块地面（画板 tab 已经打开）。画完后依次调用三次 whiteboard_look：第一次 debug 用 per-light，第二次 angles 用 turntable，第三次 diffAgainst 用 previous。三次都要看结果，最后用一句话总结三种视角分别看到了什么。
+```
+
+PASS conditions (all host-side; the phase never trusts the reply alone):
+
+1. `whiteboard_look` `tool/call`s with `debug:'per-light'`, `angles:'turntable'` and a non-empty
+   `diffAgainst` — the arguments are read from the session log, not the transcript.
+2. The tool-result text names the modes: `per-light sheet`, `turntable sheet (4 views)`,
+   `diff against …` with `% changed`, and the `Diff:` note line.
+3. The frame index has this session's `source:'look'` records (the contact sheets) and a `source:'diff'`
+   record, all newer than the pre-turn snapshot, and the look records carry `options.debug ===
+   'per-light'` / `options.angles === 'turntable'` — the index says which sheet is which.
+4. The new PNGs are valid, and the dimensions match the geometry: the per-light sheet (one tile per
+   caster; the default rig has one) and the 3-column diff sheet are wider than tall because `maxWidth`
+   is the **total** width. A 2×2 turntable grid can be taller than wide in a portrait panel, so only
+   its existence and its `options` are asserted, not its aspect.
+5. The model answered the turn (`assistant/message` grew).
+
+Screenshot: `.wbdev/shots/c-10-deep.png`; the JSON report lands under `phases.deep`.
+
+### `--phase dryrun`
+
+```sh
+node scripts/dev.mjs start
+node scripts/e2e.mjs --phase dryrun --headed    # add --dryrun-prompt "…" to replace the prompt
+```
+
+Prompt (a single line; `--dryrun-prompt` overrides it):
+
+```
+用 whiteboard_draw 在画板上画三个并排的矩形标签（画板 tab 已经打开）：先做一次 dryRun 预览，不要提交；看过预览确认位置没问题后，再用不带 dryRun 的 whiteboard_draw 真正画一次。最后用一句话说明预览和正式绘制的区别。
+```
+
+PASS conditions:
+
+1. A `whiteboard_draw` `tool/call` with `dryRun:true` **and** a later one without it (the committed
+   draw), both from the session log.
+2. The tool-result text says `(dry run)`, `would add …` and `nothing was committed`, and prints a
+   `Preview: …png` path.
+3. The frame index has a `source:'preview'` record whose PNG exists and is a valid PNG.
+4. The board document holds **only** the committed shapes: `shapes == shapes_before + Σ add ops of the
+   committed calls`. A dry run that mutated would leave the prototype shapes twice, so this is the
+   decisive witness; the tab's count must agree with the document afterwards.
+
+Screenshot: `.wbdev/shots/c-11-dryrun.png`; the JSON report lands under `phases.dryrun`.
+
+That makes eight phases. The six-phase macOS run recorded above predates `deep` and `dryrun`; both must
+be run once on the tagged build (and their PASS counts recorded here) before the slice's release gate can
+cite them. `--phase all` now includes them, so the next full run measures all eight.

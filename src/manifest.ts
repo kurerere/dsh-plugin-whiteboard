@@ -56,6 +56,7 @@ import {
   opFieldSpecs,
   type DesignSpec,
   type EnvironmentSettings,
+  type ExampleRole,
   type FieldClient,
   type FieldSpec,
   type FieldType,
@@ -549,12 +550,14 @@ function cloneExample(example: ToolCallExample): ToolCallExample {
   }
 }
 
-/** Copy the three examples so a caller cannot mutate the module constants. */
-function cloneExamples(): Readonly<Record<'draw' | 'scene3d' | 'fixShadow', ToolCallExample>> {
+/** Copy every example so a caller cannot mutate the module constants. */
+function cloneExamples(): Readonly<Record<ExampleRole, ToolCallExample>> {
   return {
     draw: cloneExample(EXAMPLES.draw),
     scene3d: cloneExample(EXAMPLES.scene3d),
     fixShadow: cloneExample(EXAMPLES.fixShadow),
+    diffLook: cloneExample(EXAMPLES.diffLook),
+    dryRun: cloneExample(EXAMPLES.dryRun),
   }
 }
 

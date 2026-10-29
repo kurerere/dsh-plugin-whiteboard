@@ -103,13 +103,16 @@ are kept: migration copies, it never moves or deletes.
 
 | Tool | Purpose |
 |---|---|
-| `whiteboard_draw` | append 2D ops (add / update / remove / clear) |
-| `whiteboard_3d` | append 3D ops plus an optional view (camera, background, grid, autoRotate) |
+| `whiteboard_draw` | append 2D ops (add / update / remove / clear); `dryRun` previews without committing |
+| `whiteboard_3d` | append 3D ops plus an optional view (camera, lights/shadows, background, grid, autoRotate); `dryRun` previews without committing |
 | `whiteboard_read` | report the current board so the model can revise its own drawing |
+| `whiteboard_look` | capture the panel: plain, `shadow-only`, `per-light`, `angles: 'turntable'`, or a `diffAgainst` comparison |
+| `whiteboard_api` | the manifest: tools, fields, defaults, palette, live state, limits, examples, hints |
+| `whiteboard_history` / `whiteboard_undo` | read the memory-only undo stack / step back one or more mutations |
 
-Two edges were traded for the budget: the model no longer sets the 2D canvas background/grid or the 3D
-lights — both stay in the document model for the client, and their defaults (theme-following background,
-first-party lighting) are what the board should use anyway.
+The 3D light rig was handed back to the model in P2 (`view.lights`, `castShadow`, shadow-map tuning), so
+of the two v1 budget cuts only the 2D canvas background and grid remain reserved (`view2d.accepted:
+false` in the manifest); the model can now see and fix the lighting it draws.
 
 Argument shapes are **flat** (`op`, `id`, `kind`, geometry scalars, style scalars) because the
 schema DSL is easiest to satisfy with one object spec and a flat list is what a model gets right.
@@ -380,3 +383,69 @@ Gate at this tree: `pnpm run check` green — typecheck, both bundles, declarati
 contract (7 routes, 7 tools), **50 tests (47 pass, 3 Windows-only skips)**. On macOS/system Chrome the
 new build passed the e2e `tools` phase (4 PASS, 1 SKIP for no spawned subagent session) and the `look`
 phase (5 PASS, one new 995×1280 frame).
+
+### P4 — deep look and dry runs (2026-10-29)
+
+The picture channel stopped being one flat frame per request. `whiteboard_look` gained three explicit
+requests and the draw tools gained a preview. The product rules — not the extra pixels — are the slice:
+
+- **Tab-only, unchanged.** Every frame in this slice — a per-light sheet, a turntable, a diff baseline
+  and its changed panel, a dry-run preview — is rendered **inside the open 画板 tab** while it polls the
+  Host. There is deliberately no headless renderer, so a closed panel still fails with the same readable
+  "open the 画板 tab" error. The extra views cost the open tab work, not the Host.
+- **A plain look still captures what the user sees.** `per-light`, `turntable` and `diffAgainst` are
+  explicit model requests, never side effects of a normal capture. They may render extra views, but the
+  live stage must not visibly change: no teardown/restore flash, no camera jump, no scroll.
+- **The preview renders offscreen in the open tab.** A dry run hands the panel the hypothetical document
+  as `CaptureRequest.preview`. A 2D preview goes through a static painter with no appear animation; a 3D
+  preview goes through a **hidden fixed 960×600 3D stage** that exists exactly once, so the visible
+  surface and its orbit are untouched. Two WebGL contexts exist while the tab is open; that is the
+  accepted cost of not having a second rendering path.
+- **Dry run never commits.** No store mutation, no undo entry, no revision bump. The preview PNG is saved
+  and indexed with `source: 'preview'`, `checks` / `warnings` describe the hypothetical board, and the
+  result line says `nothing was committed`. A dry run with no panel is an error (unlike a normal draw,
+  which still succeeds without a frame) because a preview nobody can see is not a preview.
+- **Diff is a document comparison when it can be.** `previous` and `rev:<n>` resolve through
+  `BoardStore.previous` / `revision` — the memory-only undo history — and are re-rendered with the
+  **current** camera, so a content change is isolated from an orbit. `previous` is the document before
+  the latest mutation; `rev:<n>` is a retained document whose own `board.rev` matches. A 6–16 character
+  frame hash resolves through the frame index and compares two stored images instead; that comparison is
+  marked `comparable: false` with a note when the camera or aspect ratio differs. The baseline surface
+  must equal the current `board.mode`, otherwise the call errors instead of comparing a 2D canvas with a
+  3D scene — except that an entirely empty earlier board is surface-agnostic and follows the current
+  surface, so the first 3D batch on a fresh board can still be compared with "empty before this edit".
+  The answer carries `CaptureDiff` (`kind`, `label`, `rev`, `changedPixels`, `changedRatio`,
+  optional `bounds` in new-frame pixels, `comparable`, `note`) and the result line names it
+  (`diff against previous: 2.3% changed`, or `diff against rev:12: …` for a revision).
+- **Sheet geometry is bounded and stated.** A contact sheet's `maxWidth` is the **total** width, not a
+  tile's: four turntable views (2×2, labels `0°`/`90°`/`180°`/`270°`), one per-light tile per light
+  (2 columns, label `#<n> <kind> <intensity>`), and one 8 MB capture answer. `LIMITS` publishes these
+  numbers (`turntableViews`, `perLightTiles`, `answerBytes`) so the model can read them instead of
+  guessing a budget. `per-light` requires at least one caster (`shadowCasters` in `src/scene.ts`); with
+  none, the error says how to arm one (`castShadow: true`), and `per-light` + `turntable` are mutually
+  exclusive because each is already a multi-tile sheet.
+- **Frames became a readable store.** The content-addressed PNGs are unchanged, but each session now
+  also has `frames/<session>/index.json`: newest-first records (max 64) with `hash`, path, bytes,
+  ISO timestamp, size, mode, revision, `source` (`look` / `auto` / `preview` / `diff`), camera and the
+  options the frame was captured with. It is written atomically (`0600`) and serialised per session; a
+  failed index write is logged and never fails the save. `byHash` resolves a 6+ hex prefix
+  (case-insensitive), and a `save` prunes the files behind the records it evicted. The index is what
+  makes `diffAgainst: '<hash>'` possible, and it is the on-disk witness the e2e phases read.
+- **Checks run on the uncommitted board too.** `boardChecks` / `warningsOf` are pure, so a dry run
+  reports them for the preview document. That is the same evidence a committed batch would get, without
+  touching the board.
+
+Verification on this tree: `node --test scripts/frames.test.mjs scripts/capture.test.mjs
+scripts/tools.test.mjs scripts/spec.test.mjs` → **68/68 pass** (10 frame-store + 11 capture, 29 tools,
+18 spec); the full `node --test` list in `package.json` runs **93 pass, 3 Windows-only skips, 0 fail**
+(96 tests). The frame tests cover content addressing, newest-first listing, meta round-trip, prefix
+lookup, prune, the 64-record cap, a failed index write and a fresh store instance reading the index. The
+tool tests cover per-light/turntable validation and pass-through, 2D and 3D diffs, document and image
+baselines, `previous`/`rev:N` resolution, every bad-selector error, and dry runs (no `store.mutate`,
+preview + checks + image, a missing panel, a missing capture channel, a failed capture). The board store's
+memory-only `previous` / `revision` are tested against the real store in `scripts/store-retry.test.mjs`
+(the pre-mutation document, lookup by `board.rev`, and both disappearing after `newBoard` / a restart).
+
+`scripts/e2e.mjs` gained `--phase deep` and `--phase dryrun` (prompts and PASS conditions in
+[notes/harness.md](harness.md)); they need the dev Host and the real model, and are run as part of the
+release gate rather than in `node --test`.

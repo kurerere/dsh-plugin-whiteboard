@@ -37,7 +37,10 @@
  * document for a convenience feature, and a Host restart is exactly when a user
  * expects to be looking at the durable board rather than a pre-restart step.
  * History therefore lives in-process (bounded, newest last), is cleared when the
- * board is replaced by `newBoard()`, and dies with `dispose()`.
+ * board is replaced by `newBoard()`, and dies with `dispose()`. The same entries
+ * answer {@link BoardStore.previous} and {@link BoardStore.revision}, which is
+ * what a `diffAgainst` look re-renders: a before/after comparison must not need
+ * a second, durable copy of the board.
  */
 import { readFileSync } from 'node:fs'
 import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
@@ -149,6 +152,27 @@ export interface BoardStore {
    * @returns the retained steps, oldest first; empty when nothing can be undone.
    */
   history(sessionId: string): { rev: number; kind: UndoKind }[]
+  /**
+   * The document before the latest mutation: the newest retained undo step.
+   *
+   * A `diffAgainst:'previous'` look re-renders it with the current camera, so
+   * the model compares board content instead of also comparing an orbit.
+   * Memory only: `undefined` after a Host restart, when the history is empty,
+   * when the board was replaced by {@link newBoard}, and after {@link dispose}.
+   * @param sessionId - whiteboard Session id (the board key).
+   * @returns the pre-mutation snapshot, or `undefined` when there is none.
+   */
+  previous(sessionId: string): BoardSnapshot | undefined
+  /**
+   * A retained document whose own `board.rev` equals `rev`.
+   *
+   * This is how `diffAgainst:'rev:<n>'` finds the document to re-render; only
+   * the bounded in-memory history is searched, never the disk.
+   * @param sessionId - whiteboard Session id (the board key).
+   * @param rev - the revision to find (a retained step's own revision).
+   * @returns the matching snapshot, newest first, or `undefined` when pruned.
+   */
+  revision(sessionId: string, rev: number): BoardSnapshot | undefined
   /**
    * Make sure a board document exists, creating an empty one when absent.
    * An existing document is never overwritten. Resets that board's undo history:
@@ -369,6 +393,27 @@ export function createBoardStore(ctx: Context): BoardStore {
     return (history.get(sessionId) ?? []).map(entry => ({ rev: entry.snapshot.rev, kind: entry.kind }))
   }
 
+  const previous = (sessionId: string): BoardSnapshot | undefined => {
+    assertLive()
+    // History is newest last, so the tail is the document as it was before the
+    // most recent successful mutation.
+    return history.get(sessionId)?.at(-1)?.snapshot
+  }
+
+  const revision = (sessionId: string, rev: number): BoardSnapshot | undefined => {
+    assertLive()
+    if (typeof rev !== 'number' || !Number.isFinite(rev)) return undefined
+    const entries = history.get(sessionId)
+    if (entries === undefined) return undefined
+    // Newest entry wins: an undo can leave the same revision retained twice in
+    // theory, and the later copy is the one the model most likely means.
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const entry = entries[index]
+      if (entry !== undefined && entry.snapshot.rev === rev) return entry.snapshot
+    }
+    return undefined
+  }
+
   const undo = (sessionId: string): Promise<UndoOutcome | undefined> => {
     assertLive()
     return serial(sessionId, async () => {
@@ -412,5 +457,5 @@ export function createBoardStore(ctx: Context): BoardStore {
     history.clear()
   }
 
-  return { read, mutate, clear, undo, canUndo, history: historyOf, newBoard, dispose }
+  return { read, mutate, clear, undo, canUndo, history: historyOf, previous, revision, newBoard, dispose }
 }

@@ -61,7 +61,7 @@
     "build": "node scripts/build.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "types": "node -e \"require('node:fs').rmSync('lib/types',{recursive:true,force:true})\" && tsc -p tsconfig.types.json",
-    "check": "pnpm run typecheck && pnpm run build && pnpm run types && node scripts/verify-artifacts.mjs && node --test scripts/scene.test.mjs scripts/face-budget.test.mjs scripts/capture.test.mjs scripts/tools.test.mjs scripts/spec.test.mjs scripts/store-retry.test.mjs scripts/platform.test.mjs"
+    "check": "pnpm run typecheck && pnpm run build && pnpm run types && node scripts/verify-artifacts.mjs && node --test scripts/scene.test.mjs scripts/face-budget.test.mjs scripts/capture.test.mjs scripts/frames.test.mjs scripts/tools.test.mjs scripts/spec.test.mjs scripts/store-retry.test.mjs scripts/platform.test.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.0.5",

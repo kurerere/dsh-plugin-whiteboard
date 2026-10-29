@@ -184,6 +184,30 @@ body:not([data-ds-dark-theme]) .dshwb-root {
   height: 100%;
 }
 
+/* Offscreen renderer for dry-run previews and 3D diff baselines.
+ *
+ * A normal look captures the stage the user sees. A dry run and a `diffAgainst`
+ * look are about a *document*, so they are rendered by a second `Board3D` that
+ * lives outside the layout entirely: fixed at a known 960×600, parked off-screen,
+ * hidden and inert. Fixed positioning keeps it out of flow (it cannot push or
+ * squeeze the board, the bar or the composer), `visibility: hidden` keeps it out
+ * of the accessibility tree and off the paint path, and `pointer-events: none`
+ * makes sure a stray click can never land on it. Its CSS px size is fixed so the
+ * frames it renders are reproducible; the WebGL canvas inside still draws its
+ * backing store at the device pixel ratio. */
+.dshwb-previewStage {
+  position: fixed;
+  top: 0;
+  left: -10000px;
+  width: 960px;
+  height: 600px;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+  contain: strict;
+  z-index: -1;
+}
+
 .dshwb-stage3dHost {
   position: absolute;
   inset: 0;

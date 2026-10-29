@@ -14,9 +14,15 @@
  *   `visible !== false`), the document is visible, and the stage has been
  *   measured. A hidden, collapsed or background tab stops entirely instead of
  *   rendering a screenshot the user cannot check;
- * - a capture always takes **the surface currently displayed**, even when the
- *   request names the other one. The answer reports the real surface, which is
- *   how the contract lets the panel narrow a request;
+ * - a plain capture always takes **the surface currently displayed**, even when
+ *   the request names the other one. The answer reports the real surface, which
+ *   is how the contract lets the panel narrow a request;
+ * - an explicit request may ask for a frame the user is not looking at — a dry
+ *   run previews an uncommitted document, a `diffAgainst` look re-renders an
+ *   earlier one — and those are rendered **offscreen, inside this same tab**, by
+ *   {@link CaptureSource.snapshot} / {@link CaptureSource.renderBaseline}. They
+ *   never move the live stage; a closed panel still fails with the readable
+ *   error the tool shows the model;
  * - failures are ordinary (WebGL unavailable, stage just mounted, canvas gone):
  *   they are answered as an error and never shown in the board UI.
  *
@@ -28,9 +34,10 @@
 import { useEffect, useRef } from 'react'
 import {
   CAPTURE_POLL_PATH, CAPTURE_SUBMIT_PATH,
-  type CaptureAnswer, type CaptureOptions, type CaptureRequest, type CaptureViewport,
+  type CaptureAnswer, type CaptureBaseline, type CaptureOptions, type CaptureRequest, type CaptureViewport,
 } from '../shared.ts'
-import type { BoardMode, BoardState, Camera3D } from '../scene.ts'
+import { isBoardState, type BoardMode, type BoardState, type Camera3D, type Vec3 } from '../scene.ts'
+import { diffFrames, type DiffMeta, type DiffResult } from './diff.ts'
 import { overlayShapeIds } from './overlay.ts'
 import { wakeBoard } from './poll.ts'
 
@@ -53,6 +60,24 @@ const REVISION_WAIT_MS = 500
 
 /** Step of {@link REVISION_WAIT_MS}, in ms. */
 const REVISION_STEP_MS = 40
+
+/**
+ * Relative camera-distance change that still counts as "the same view".
+ *
+ * A stored frame is compared pixel for pixel, so any orbit or dolly shows up as
+ * changed pixels. These tolerances are therefore tight enough to catch a nudged
+ * camera and wide enough to forgive float noise in the reported camera.
+ */
+const CAMERA_DISTANCE_TOLERANCE = 0.02
+
+/** Camera-orbit change, in degrees, that still counts as "the same view". */
+const CAMERA_ANGLE_TOLERANCE = 1.5
+
+/** Field-of-view change, in degrees, that still counts as "the same view". */
+const CAMERA_FOV_TOLERANCE = 1.5
+
+/** Relative aspect-ratio change that still counts as "the same frame shape". */
+const ASPECT_TOLERANCE = 0.01
 
 /**
  * Requests currently being answered by this page.
@@ -81,6 +106,12 @@ export interface CaptureFrame {
   readonly camera?: Camera3D
   /** Stage size in CSS pixels. */
   readonly viewport?: CaptureViewport
+  /**
+   * Captions of the views a contact sheet contains (`0°`, `90°`, … or
+   * `#2 directional 1.6`), top-left to right. Absent on an ordinary frame; the
+   * answer forwards them so the tool can say what the sheet shows.
+   */
+  readonly tiles?: string[]
 }
 
 /** What the capture hook needs from the board that is on screen. */
@@ -98,8 +129,31 @@ export interface CaptureSource {
   /**
    * Take the frame the request asks for. May throw; the thrown message becomes
    * the tool error the model reads.
+   *
+   * A plain request takes what the user sees. A dry-run request
+   * ({@link CaptureRequest.preview}) renders that uncommitted document offscreen
+   * instead, and the answer reports the preview document's own surface — that is
+   * the whole point of a dry run: the user's stage does not have to move for the
+   * model to see the result.
    */
-  readonly snapshot: (options: CaptureOptions) => CaptureFrame
+  readonly snapshot: (options: CaptureOptions, request: CaptureRequest) => CaptureFrame
+  /**
+   * Render an earlier document for a `diffAgainst` look, offscreen, with the
+   * current view and the exact size of the frame it is compared with.
+   *
+   * A 2D baseline is painted at the live canvas's own backing resolution (see
+   * `renderBoardFrame`), because that is how the live frame was rasterized before
+   * it was downscaled; a 3D baseline is rendered at the exact frame size with the
+   * live stage's `viewport`, so id plates land on the same pixels they occupy in
+   * the frame they are compared with.
+   */
+  readonly renderBaseline: (
+    board: BoardState,
+    options: CaptureOptions,
+    camera?: Camera3D,
+    size?: { width: number; height: number },
+    viewport?: CaptureViewport,
+  ) => CaptureFrame
 }
 
 /**
@@ -203,6 +257,228 @@ export function capture2d(stage: HTMLElement, board: BoardState, options: Captur
   }
 }
 
+/** `2D` / `3D`, for sentences the model repeats. */
+function surfaceName(mode: BoardMode): string {
+  return mode === '3d' ? '3D' : '2D'
+}
+
+/** Read one frame's camera offset from its target, in world units. */
+function viewOffset(camera: Camera3D): Vec3 {
+  const [x, y, z] = camera.position
+  const [targetX, targetY, targetZ] = camera.target
+  return [x - targetX, y - targetY, z - targetZ]
+}
+
+function vectorLength([x, y, z]: Vec3): number {
+  return Math.hypot(x, y, z)
+}
+
+function dot([ax, ay, az]: Vec3, [bx, by, bz]: Vec3): number {
+  return ax * bx + ay * by + az * bz
+}
+
+function clampUnit(value: number): number {
+  return value < -1 ? -1 : value > 1 ? 1 : value
+}
+
+/**
+ * How far two cameras are apart, in the three ways that change pixels.
+ * @param current - camera the new frame was taken with.
+ * @param baseline - camera recorded with the stored frame.
+ * @returns relative distance change, orbit angle in degrees, and fov change.
+ */
+function cameraDelta(current: Camera3D, baseline: Camera3D): { distance: number; angle: number; fov: number } {
+  const offsetA = viewOffset(current)
+  const offsetB = viewOffset(baseline)
+  const lengthA = vectorLength(offsetA)
+  const lengthB = vectorLength(offsetB)
+  const longest = Math.max(lengthA, lengthB, 1e-6)
+  const distance = Math.abs(lengthA - lengthB) / longest
+  const angle = lengthA < 1e-6 || lengthB < 1e-6
+    ? 0
+    : (Math.acos(clampUnit(dot(offsetA, offsetB) / (lengthA * lengthB))) * 180) / Math.PI
+  return { distance, angle, fov: Math.abs(current.fov - baseline.fov) }
+}
+
+/** Whether two frames have (nearly) the same aspect ratio. */
+function sameAspect(before: { width: number; height: number }, after: { width: number; height: number }): boolean {
+  const ratioBefore = before.width / Math.max(1, before.height)
+  const ratioAfter = after.width / Math.max(1, after.height)
+  return Math.abs(ratioBefore - ratioAfter) / Math.max(ratioBefore, ratioAfter, 1e-6) <= ASPECT_TOLERANCE
+}
+
+/**
+ * Describe one comparison for the model.
+ *
+ * A document baseline is re-rendered from the saved document with the current
+ * view, the current size and the current viewport, so it is comparable by
+ * construction — unless the two documents are of different surfaces, which the
+ * tools reject but a stale request may still carry. A stored frame cannot prove
+ * it was taken from the same view, so every mismatch that would put unrelated
+ * pixels in the red mask is listed in the note instead of being hidden.
+ * @param frame - the frame that was just captured.
+ * @param baseline - what it was compared with.
+ * @returns the diff metadata the answer carries.
+ */
+function baselineMeta(frame: CaptureFrame, baseline: CaptureBaseline): DiffMeta {
+  if (baseline.kind === 'document') {
+    if (baseline.board.mode === frame.mode) {
+      return {
+        label: baseline.label,
+        rev: baseline.rev,
+        kind: 'document',
+        comparable: true,
+        note: `Compared with ${baseline.label}, re-rendered from the saved document with the same view,`
+          + ' size and viewport, so the changed pixels are content changes.',
+      }
+    }
+    return {
+      label: baseline.label,
+      rev: baseline.rev,
+      kind: 'document',
+      comparable: false,
+      note: `Approximate comparison with ${baseline.label}: that document shows the`
+        + ` ${surfaceName(baseline.board.mode)} surface and this frame shows the ${surfaceName(frame.mode)} one.`,
+    }
+  }
+
+  const problems: string[] = []
+  if (baseline.mode !== frame.mode) {
+    problems.push(`it shows the ${surfaceName(baseline.mode)} surface and this frame shows the ${surfaceName(frame.mode)} one`)
+  }
+  if (frame.mode === '3d') {
+    if (baseline.camera === undefined) {
+      problems.push('it does not record the camera it was taken with')
+    } else if (frame.camera === undefined) {
+      problems.push('this frame does not report its camera')
+    } else {
+      const delta = cameraDelta(frame.camera, baseline.camera)
+      if (delta.distance > CAMERA_DISTANCE_TOLERANCE) {
+        problems.push(`the camera distance changed by ${(delta.distance * 100).toFixed(1)}%`)
+      }
+      if (delta.angle > CAMERA_ANGLE_TOLERANCE) problems.push(`the camera was orbited by ${delta.angle.toFixed(1)}°`)
+      if (delta.fov > CAMERA_FOV_TOLERANCE) problems.push(`the field of view changed by ${delta.fov.toFixed(1)}°`)
+    }
+  }
+  if (!sameAspect(baseline, frame)) {
+    problems.push(`the frame shape changed (${baseline.width}×${baseline.height} → ${frame.width}×${frame.height}),`
+      + ' so the stored frame was scaled to fit')
+  }
+  if (problems.length === 0) {
+    return {
+      label: baseline.label,
+      rev: baseline.rev,
+      kind: 'image',
+      comparable: true,
+      note: `Compared with the stored frame ${baseline.label}, taken with the same`
+        + ` ${frame.mode === '3d' ? 'camera, size and surface' : 'size and surface'},`
+        + ' so the changed pixels are content changes.',
+    }
+  }
+  return {
+    label: baseline.label,
+    rev: baseline.rev,
+    kind: 'image',
+    comparable: false,
+    note: `Approximate comparison with the stored frame ${baseline.label}: ${problems.join('; ')}.`,
+  }
+}
+
+/**
+ * Compare the fresh frame with the request's baseline.
+ *
+ * A document baseline is re-rendered here (the panel never reads the global
+ * board state behind the cache), at the current frame's exact size — and, for 3D,
+ * with the live stage's viewport, which is what makes an `ids` overlay land on the
+ * same pixels in both pictures so the diff reports content changes only. An image
+ * baseline is handed to `diff.ts` as it is and only labelled with what is known
+ * about it.
+ * @param frame - the frame that was just captured.
+ * @param baseline - the earlier document or stored frame.
+ * @param options - the options the frame was rendered with, so the baseline shows
+ *   the same overlays as the picture it is compared with.
+ * @param render - the offscreen baseline renderer of the mounted surface.
+ * @returns the composed sheet and its numbers.
+ */
+async function diffAgainst(
+  frame: CaptureFrame,
+  baseline: CaptureBaseline,
+  options: CaptureOptions,
+  render: CaptureSource['renderBaseline'],
+): Promise<DiffResult> {
+  const meta = baselineMeta(frame, baseline)
+  if (baseline.kind === 'image') {
+    const stored: CaptureFrame = {
+      png: baseline.png,
+      width: baseline.width,
+      height: baseline.height,
+      mode: baseline.mode,
+      ...(baseline.camera === undefined ? {} : { camera: baseline.camera }),
+    }
+    return diffFrames(stored, frame, meta)
+  }
+  const before = render(
+    baseline.board,
+    options,
+    frame.camera,
+    { width: frame.width, height: frame.height },
+    frame.viewport,
+  )
+  return diffFrames(before, frame, meta)
+}
+
+/**
+ * The answer for a captured frame: the frame itself, plus the diff sheet when the
+ * request carried a baseline and the preview flag when it rendered a dry run.
+ * @param request - the request being answered.
+ * @param frame - its frame (the preview document's, when the request had one).
+ * @param render - the offscreen baseline renderer of the mounted surface.
+ * @returns the answer body, ready to POST; throws when the baseline cannot be read.
+ */
+async function frameAnswer(
+  request: CaptureRequest,
+  frame: CaptureFrame,
+  render: CaptureSource['renderBaseline'],
+): Promise<CaptureAnswer> {
+  const answer: CaptureAnswer = {
+    requestId: request.id,
+    png: frame.png,
+    width: frame.width,
+    height: frame.height,
+    mode: frame.mode,
+    ...(frame.camera === undefined ? {} : { camera: frame.camera }),
+    ...(frame.viewport === undefined ? {} : { viewport: frame.viewport }),
+    ...(request.preview === undefined ? {} : { preview: true }),
+    // A 3D contact sheet answers with one PNG plus the captions of its views;
+    // the frame carries them, the answer has to forward them.
+    ...(frame.tiles === undefined || frame.tiles.length === 0 ? {} : { tiles: frame.tiles }),
+  }
+  const baseline = request.baseline
+  if (baseline === undefined) return answer
+  const compared = await diffAgainst(frame, baseline, request.options, render)
+  // The sheet replaces the picture; the camera and viewport stay the live
+  // stage's, because they describe where the user is looking, not the sheet. Its
+  // captions replace the frame's, which a diff request never has.
+  return {
+    ...answer,
+    png: compared.png,
+    width: compared.width,
+    height: compared.height,
+    diff: compared.diff,
+    tiles: compared.tiles,
+  }
+}
+
+/** The error answer for a request that could not be answered. */
+function failed(requestId: string, error: string, mode: BoardMode): CaptureAnswer {
+  return { requestId, png: '', width: 0, height: 0, mode, error }
+}
+
+/** The message of a thrown value, with a usable fallback. */
+function failureOf(error: unknown): string {
+  return error instanceof Error && error.message !== '' ? error.message : 'the board could not be captured'
+}
+
 /**
  * Wait, briefly, for the displayed board to reach the revision a request names.
  *
@@ -228,20 +504,23 @@ async function alignRevision(request: CaptureRequest, sessionId: string, display
 
 /**
  * Poll the Host for capture requests while the board is on screen, and answer
- * them with a frame of the surface currently displayed.
+ * them with a frame of the surface the request asks for.
  *
  * The loop is deliberately serial: a tick only schedules the next one after the
  * request it found has been captured and submitted, so at most one capture exists
  * at a time. `AbortController` covers the in-flight poll on hide and on unmount;
  * the answer POST is intentionally not aborted with it, because the frame the
  * model is waiting for is worth delivering even if the tab closes mid-round-trip.
- * @param source - session identity, what is on screen, and the capture callback.
+ * @param source - session identity, what is on screen, and the capture callbacks.
  */
 export function useCapture(source: CaptureSource): void {
   const { sessionId, surface, visible, ready, revision } = source
   /** Latest capture callback: a draw must not re-arm the poll. */
   const snapshot = useRef(source.snapshot)
   snapshot.current = source.snapshot
+  /** Latest offscreen baseline renderer, for the same reason. */
+  const renderBaseline = useRef(source.renderBaseline)
+  renderBaseline.current = source.renderBaseline
   /** Latest revision the canvas shows, for waiting out a just-applied mutation. */
   const currentRevision = useRef(revision)
   currentRevision.current = revision
@@ -276,34 +555,32 @@ export function useCapture(source: CaptureSource): void {
       answering.add(request.id)
       try {
         await alignRevision(request, sessionId, () => currentRevision.current)
-        let frame: CaptureFrame | undefined
-        let failure = 'the board could not be captured'
+        let body: CaptureAnswer
         try {
-          frame = snapshot.current(request.options)
+          // The whole request reaches the surface: a preview document and a diff
+          // baseline are rendered offscreen, a plain look is taken as before.
+          const frame = snapshot.current(request.options, request)
+          body = await frameAnswer(request, frame, renderBaseline.current)
         } catch (error) {
-          if (error instanceof Error && error.message !== '') failure = error.message
+          body = failed(request.id, failureOf(error), reported.current)
         }
-        const body: CaptureAnswer = frame === undefined
-          ? {
-            requestId: request.id,
-            png: '',
-            width: 0,
-            height: 0,
-            mode: reported.current,
-            error: failure,
-          }
-          : {
-            requestId: request.id,
-            png: frame.png,
-            width: frame.width,
-            height: frame.height,
-            mode: frame.mode,
-            ...(frame.camera === undefined ? {} : { camera: frame.camera }),
-            ...(frame.viewport === undefined ? {} : { viewport: frame.viewport }),
-          }
         await submit(body)
       } finally {
         answering.delete(request.id)
+      }
+    }
+
+    /**
+     * Answer a request this build cannot read. The model gets the reason instead
+     * of a timeout: a malformed baseline is a bug on the Host side of the
+     * contract, and the sentence is the only way it reaches a log.
+     */
+    const reject = async (rejected: RejectedRequest): Promise<void> => {
+      answering.add(rejected.requestId)
+      try {
+        await submit(failed(rejected.requestId, rejected.error, rejected.mode))
+      } finally {
+        answering.delete(rejected.requestId)
       }
     }
 
@@ -333,9 +610,14 @@ export function useCapture(source: CaptureSource): void {
         })
         if (response.status === 204 || !response.ok) return
         const payload: unknown = await response.json().catch(() => undefined)
-        const request = parseRequest(payload)
-        if (request === undefined || answering.has(request.id)) return
-        await answer(request)
+        const parsed = parseRequest(payload)
+        if (parsed === undefined) return
+        if (parsed.kind === 'rejected') {
+          if (!answering.has(parsed.requestId)) await reject(parsed)
+          return
+        }
+        if (answering.has(parsed.request.id)) return
+        await answer(parsed.request)
       } catch {
         // A failed poll is the normal state of a Host that is not asking — an
         // older Host has no capture route at all. The next tick simply asks again.
@@ -371,32 +653,149 @@ export function useCapture(source: CaptureSource): void {
   }, [active, sessionId])
 }
 
+/** Result of reading one optional wire value: it, or the sentence to answer with. */
+type Parsed<T> = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: string }
+
+/** A request whose optional payload this build cannot use, with the reason. */
+interface RejectedRequest {
+  readonly kind: 'rejected'
+  readonly requestId: string
+  readonly mode: BoardMode
+  readonly error: string
+}
+
+/** One poll body, read defensively: a request, or one this build must refuse. */
+type ParsedPoll = { readonly kind: 'request'; readonly request: CaptureRequest } | RejectedRequest
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Read a finite 3-tuple, or undefined when it is not one. */
+function parseVec3(value: unknown): Vec3 | undefined {
+  if (!Array.isArray(value) || value.length !== 3) return undefined
+  const [x, y, z] = value as unknown[]
+  if (typeof x !== 'number' || !Number.isFinite(x)) return undefined
+  if (typeof y !== 'number' || !Number.isFinite(y)) return undefined
+  if (typeof z !== 'number' || !Number.isFinite(z)) return undefined
+  return [x, y, z]
+}
+
+/** Read one camera, or undefined when it is not a usable framing. */
+function parseCamera(value: unknown): Camera3D | undefined {
+  if (!isRecord(value)) return undefined
+  const position = parseVec3(value['position'])
+  const target = parseVec3(value['target'])
+  const fov = value['fov']
+  if (position === undefined || target === undefined) return undefined
+  if (typeof fov !== 'number' || !Number.isFinite(fov) || fov <= 0) return undefined
+  return { position, target, fov }
+}
+
 /**
- * Read one poll response into a request, ignoring anything this build cannot use.
+ * Read the optional `baseline` field.
+ *
+ * Both kinds are validated down to what the renderers and the comparison touch:
+ * a document baseline must be a board document (so it can be re-rendered), an
+ * image baseline must carry real PNG data, a usable size and its surface. What
+ * is missing cannot be guessed, so the request is refused with a sentence
+ * instead of producing a diff against nothing.
+ * @param value - raw `baseline` field; undefined when the request has none.
+ * @returns the baseline, undefined, or the error to answer with.
+ */
+function parseBaseline(value: unknown): Parsed<CaptureBaseline | undefined> {
+  if (value === undefined) return { ok: true, value: undefined }
+  if (!isRecord(value)) return { ok: false, error: 'the diff baseline is neither a document nor a stored frame' }
+  const label = value['label']
+  const revision = value['rev']
+  if (typeof label !== 'string' || label === '') return { ok: false, error: 'the diff baseline has no label' }
+  if (typeof revision !== 'number' || !Number.isFinite(revision)) {
+    return { ok: false, error: 'the diff baseline has no revision' }
+  }
+  const rev = Math.trunc(revision)
+  if (value['kind'] === 'document') {
+    const board = value['board']
+    if (!isBoardState(board)) return { ok: false, error: 'the diff baseline document is not a usable board document' }
+    return { ok: true, value: { kind: 'document', rev, label, board } }
+  }
+  if (value['kind'] === 'image') {
+    const png = value['png']
+    const width = value['width']
+    const height = value['height']
+    const mode = value['mode']
+    if (typeof png !== 'string' || png === '') return { ok: false, error: 'the baseline frame has no image data' }
+    if (typeof width !== 'number' || !Number.isFinite(width) || width <= 0) {
+      return { ok: false, error: 'the baseline frame has no usable width' }
+    }
+    if (typeof height !== 'number' || !Number.isFinite(height) || height <= 0) {
+      return { ok: false, error: 'the baseline frame has no usable height' }
+    }
+    if (mode !== '2d' && mode !== '3d') return { ok: false, error: 'the baseline frame does not name its surface' }
+    const image: CaptureBaseline = {
+      kind: 'image',
+      rev,
+      label,
+      png,
+      width: Math.round(width),
+      height: Math.round(height),
+      mode,
+    }
+    const camera = parseCamera(value['camera'])
+    if (camera !== undefined) image.camera = camera
+    return { ok: true, value: image }
+  }
+  return { ok: false, error: 'the diff baseline is neither a document nor a stored frame' }
+}
+
+/**
+ * Read the optional `preview` field of a dry run.
+ *
+ * A preview is a whole document — the panel renders it as if it had been
+ * committed — so a value that only looks like a board is refused with a sentence
+ * rather than drawn as an empty page.
+ * @param value - raw `preview` field; undefined when the request has none.
+ * @returns the document, undefined, or the error to answer with.
+ */
+function parsePreview(value: unknown): Parsed<BoardState | undefined> {
+  if (value === undefined) return { ok: true, value: undefined }
+  if (!isBoardState(value)) return { ok: false, error: 'the dry-run preview is not a usable board document' }
+  return { ok: true, value }
+}
+
+/**
+ * Read one poll response into a request, and say why when it cannot be used.
  *
  * The route is remote input like any other, so every field the hook touches is
- * checked here even though the Host is this plugin's own code: a malformed answer
- * must be a quiet miss, never a thrown render path or an answer with undefined
- * fields.
+ * checked here even though the Host is this plugin's own code: a malformed
+ * envelope is a quiet miss, while a well-addressed request with an unusable
+ * baseline or preview is answered with a readable error — the loop never throws
+ * out of a poll and never leaves the model waiting for a frame that cannot exist.
  * @param payload - parsed JSON body, or undefined when the body was not JSON.
- * @returns a capture request, or undefined when the answer was malformed.
+ * @returns the request, the rejection, or undefined when the envelope is malformed.
  */
-function parseRequest(payload: unknown): CaptureRequest | undefined {
-  if (typeof payload !== 'object' || payload === null) return undefined
-  const request = (payload as { request?: unknown }).request
-  if (typeof request !== 'object' || request === null) return undefined
-  const record = request as Record<string, unknown>
-  const id = record['id']
-  const sessionId = record['sessionId']
+function parseRequest(payload: unknown): ParsedPoll | undefined {
+  if (!isRecord(payload)) return undefined
+  const request = payload['request']
+  if (!isRecord(request)) return undefined
+  const id = request['id']
+  const sessionId = request['sessionId']
   if (typeof id !== 'string' || id === '' || typeof sessionId !== 'string') return undefined
-  const rev = record['rev']
-  return {
+  const mode: BoardMode = request['mode'] === '3d' ? '3d' : '2d'
+  const baseline = parseBaseline(request['baseline'])
+  if (!baseline.ok) return { kind: 'rejected', requestId: id, mode, error: baseline.error }
+  const preview = parsePreview(request['preview'])
+  if (!preview.ok) return { kind: 'rejected', requestId: id, mode, error: preview.error }
+  const rev = request['rev']
+  const parsed: CaptureRequest = {
     id,
     sessionId,
     rev: typeof rev === 'number' && Number.isFinite(rev) ? rev : 0,
-    mode: record['mode'] === '3d' ? '3d' : '2d',
-    options: parseOptions(record['options']),
+    mode,
+    options: parseOptions(request['options']),
   }
+  if (baseline.value !== undefined) parsed.baseline = baseline.value
+  if (preview.value !== undefined) parsed.preview = preview.value
+  return { kind: 'request', request: parsed }
 }
 
 /**
@@ -413,7 +812,9 @@ function parseOptions(value: unknown): CaptureOptions {
   const overlay = record['overlay']
   if (overlay === 'none' || overlay === 'ids') options.overlay = overlay
   const debug = record['debug']
-  if (debug === 'lit' || debug === 'shadow-only') options.debug = debug
+  if (debug === 'lit' || debug === 'shadow-only' || debug === 'per-light') options.debug = debug
+  const angles = record['angles']
+  if (angles === 'default' || angles === 'turntable') options.angles = angles
   const maxWidth = record['maxWidth']
   if (typeof maxWidth === 'number' && Number.isFinite(maxWidth) && maxWidth > 0) options.maxWidth = maxWidth
   return options

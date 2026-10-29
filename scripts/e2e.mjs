@@ -19,14 +19,22 @@
  *             3D), and reload persistence
  *   tools     the board tools belong to the main agent (host-side `tool/call`
  *             records) and a subagent does not get them (subagent session log)
+ *   look      the model draws, calls `whiteboard_look`, and the panel answers with
+ *             a frame the Host persists (PNG + frame index)
+ *   deep      one turn that asks for the explicit capture modes: a `per-light`
+ *             sheet, a `turntable` sheet and a `diffAgainst:'previous'` diff, each
+ *             witnessed by its `tool/call` arguments, its result text and its PNG
+ *   dryrun    a `dryRun` draw that previews without committing, followed by the
+ *             real draw; the board must hold only the committed shapes and the
+ *             frame index must hold a `source:'preview'` frame
  *
  * Board documents and session logs are read from disk, so every claim has a
  * host-side witness next to the browser observation.
  *
- *   node scripts/e2e.mjs [--phase load|headline|say|regress|tools|look|all]
+ *   node scripts/e2e.mjs [--phase load|headline|say|regress|tools|look|deep|dryrun|all]
  *                        [--headed] [--url <tokenized url>] [--out <report.json>]
  *                        [--timeout 240000] [--draw-prompt "…"] [--look-prompt "…"]
- *                        [--keep-session]
+ *                        [--deep-prompt "…"] [--dryrun-prompt "…"] [--keep-session]
  *
  * The browser is a system Chrome when one is available (macOS default, or
  * `WBDEV_CHROME_PATH`); that lets the harness run from an npx Playwright package
@@ -82,9 +90,20 @@ const opts = {
     'look-prompt',
     '在画板上画一个简单的 3D 球（画板 tab 已经打开），画完后必须调用 whiteboard_look 看一下，最后用一句话说你看到了什么。',
   ),
+  deepPrompt: arg(
+    'deep-prompt',
+    '在画板上画一个简单的 3D 场景：一个球和一块地面（画板 tab 已经打开）。画完后依次调用三次 whiteboard_look：'
+    + '第一次 debug 用 per-light，第二次 angles 用 turntable，第三次 diffAgainst 用 previous。三次都要看结果，'
+    + '最后用一句话总结三种视角分别看到了什么。',
+  ),
+  dryrunPrompt: arg(
+    'dryrun-prompt',
+    '用 whiteboard_draw 在画板上画三个并排的矩形标签（画板 tab 已经打开）：先做一次 dryRun 预览，不要提交；'
+    + '看过预览确认位置没问题后，再用不带 dryRun 的 whiteboard_draw 真正画一次。最后用一句话说明预览和正式绘制的区别。',
+  ),
   keepSession: has('keep-session'),
 }
-const PHASES = ['load', 'headline', 'say', 'regress', 'tools', 'look']
+const PHASES = ['load', 'headline', 'say', 'regress', 'tools', 'look', 'deep', 'dryrun']
 const RUN = opts.phase === 'all' ? PHASES : [opts.phase]
 if (!RUN.every((p) => PHASES.includes(p))) {
   console.error(`e2e: unknown phase "${opts.phase}" (use ${PHASES.join('|')}|all)`)
@@ -295,6 +314,65 @@ const resultTexts = (records) =>
   records
     .filter((r) => r.type === 'tool/result')
     .map((r) => ((r.data?.message?.content ?? []).filter((c) => c.type === 'text').map((c) => c.text).join(' ')))
+
+/**
+ * Parsed `tool/call` records: the tool name and the arguments object the model
+ * sent. `arguments` is stored as the raw JSON string, so a torn call is still a
+ * call with `{}` instead of failing the whole phase.
+ * @param records - decoded session records.
+ * @returns one entry per call, in log order.
+ */
+function toolCallDetails(records) {
+  const out = []
+  for (const record of records) {
+    if (record.type !== 'tool/call') continue
+    const name = record.data?.name
+    if (typeof name !== 'string' || name === '') continue
+    let args = {}
+    const raw = record.data?.arguments
+    try {
+      // The log normally holds the raw JSON string; tolerate an already-parsed
+      // object so a reader change cannot turn every argument assertion into `{}`.
+      const parsed = raw !== null && typeof raw === 'object' ? raw : JSON.parse(raw ?? '{}')
+      if (parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) args = parsed
+    } catch {
+      /* a torn argument string is still a call */
+    }
+    out.push({ name, callId: record.data?.callId ?? null, args })
+  }
+  return out
+}
+
+/**
+ * The Host's newest-first frame index for one board, or [] on a build that does
+ * not write one yet. The index is the only place a frame's `source`
+ * (look/auto/preview/diff) is recorded on disk.
+ * @param sessionId - board key.
+ */
+function frameIndex(sessionId) {
+  try {
+    const parsed = JSON.parse(readFileSync(join(FRAMES_DIR, sessionId, 'index.json'), 'utf8'))
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * PNGs written since a frame snapshot, oldest first, with their header info.
+ * @param before - `listFrames()` taken earlier.
+ */
+function freshFramesSince(before) {
+  const beforeFiles = new Set(before.map((frame) => frame.file))
+  return listFrames()
+    .filter((frame) => !beforeFiles.has(frame.file))
+    .map((frame) => ({ ...pngInfo(frame.file), mtime: frame.mtime }))
+}
+
+/** How many `add` ops a recorded draw call carried. */
+function addedShapes(call) {
+  return Array.isArray(call.args.ops) ? call.args.ops.filter((op) => op?.op === 'add').length : 0
+}
 
 // ---------------------------------------------------------------------------
 // browser
@@ -1094,6 +1172,26 @@ async function phaseHeadline() {
   const closed = await closeWhiteboardTab()
   check('tab closed before the headline test', closed, closed ? '.dshwb-root gone' : 'tab would not close')
 
+  // Isolate the reveal watcher. It remembers a conversation once it has seen the
+  // board open, so a previous phase that booted with the tab on screen would make
+  // this test measure "already revealed" instead of the first drawing. Reloading
+  // now that the tab is closed gives the watcher a fresh page; if the shell
+  // restores the tab on boot, close it again before the first 1.5 s tick.
+  await page.reload({ waitUntil: 'domcontentloaded' })
+  await page.waitForSelector('#root > *', { timeout: 60_000 })
+  // The shell restores the selected conversation asynchronously; reading it
+  // before that produces a null session id and measures the wrong board file.
+  await page.waitForSelector('[data-conversation-session]', { timeout: 30_000 })
+  await page.waitForTimeout(1200)
+  await closeWhiteboardTab()
+  await ensureSidebar()
+  const isolated = await closeWhiteboardTab()
+  check(
+    'tab stays closed on the isolated headline page',
+    isolated,
+    isolated ? '.dshwb-root gone after reload' : 'the shell reopened the tab and it would not close',
+  )
+
   // The current conversation is the subject: model C gives it a board. (Creating a
   // new Session is optional: the app reuses an empty conversation, so `--new-session`
   // is only used against a fresh home where that is known to produce a new id.)
@@ -1783,6 +1881,305 @@ async function phaseLook() {
 }
 
 // ---------------------------------------------------------------------------
+// phase: deep
+// ---------------------------------------------------------------------------
+/**
+ * The explicit capture modes: one drawing turn asks for a per-light contact
+ * sheet, a turntable sheet and a document diff. Every PASS is host-side — the
+ * `tool/call` arguments, the tool-result text, the PNG headers and the frame
+ * index — so a model that merely *says* it looked cannot pass.
+ */
+async function phaseDeep() {
+  await openApp()
+  const fresh = await newSession()
+  // Prefer the id the app reported after creating the conversation; `mainSessionId`
+  // can still describe the previous one while the new view mounts.
+  const sid = fresh.created ? fresh.after : ((await mainSessionId()) ?? fresh.before)
+  if (sid === null) throw new Error('no main session after 新建会话')
+  if ((await mainSessionId()) !== sid) {
+    const selected = await selectSession(sid)
+    if (!selected) throw new Error(`could not select the deep-look conversation ${sid}`)
+  }
+  // Contact sheets are captured only while the tab is on screen, so open it first.
+  const dom = await openWhiteboardTab()
+  if (dom.sessionId !== sid) throw new Error(`the tab is bound to ${dom.sessionId ?? 'none'}, expected ${sid}`)
+
+  const framesBefore = listFrames()
+  const turnsBefore = countTypes(sessionRecords(sid))
+  const t0 = Date.now()
+  await sendFromMainComposer(opts.deepPrompt)
+  const started = await waitFor(() => {
+    const counts = countTypes(sessionRecords(sid))
+    return (counts['turn/start'] ?? 0) > (turnsBefore['turn/start'] ?? 0) ? counts : null
+  }, 60_000, 500)
+  check(
+    'deep turn started',
+    started.ok,
+    started.ok ? `turn/start ${started.value['turn/start']} (${started.elapsedMs} ms)` : 'no turn/start within 60 s',
+  )
+  const idle = await waitForIdle(sid, opts.timeoutMs)
+  check(
+    'deep turn finished',
+    idle.ok,
+    `turn/start ${idle.starts} / turn/end ${idle.ends} (~${idle.elapsedMs} ms)`,
+  )
+
+  const records = sessionRecords(sid)
+  const calls = toolCallDetails(records)
+  const lookCalls = calls.filter((call) => call.name === 'whiteboard_look')
+  check(
+    'whiteboard_look was called for the deep looks',
+    lookCalls.length >= 2,
+    lookCalls.length > 0
+      ? `${lookCalls.length} whiteboard_look call(s)`
+      : `no whiteboard_look in [${[...new Set(calls.map((call) => call.name))].slice(0, 12).join(', ')}]`,
+  )
+  const argText = JSON.stringify(lookCalls.map((call) => call.args))
+
+  const perLight = lookCalls.filter((call) => call.args.debug === 'per-light')
+  check('a look asked for the per-light sheet (debug: per-light)', perLight.length > 0, argText)
+  const turntable = lookCalls.filter((call) => call.args.angles === 'turntable')
+  check('a look asked for the turntable sheet (angles: turntable)', turntable.length > 0, argText)
+  const diffCalls = lookCalls.filter(
+    (call) => typeof call.args.diffAgainst === 'string' && call.args.diffAgainst.trim() !== '',
+  )
+  check('a look asked for a diff (diffAgainst)', diffCalls.length > 0, argText)
+
+  // The tool-result text is the model-facing half of the contract: the summary
+  // must name the mode and the diff must carry its note.
+  const results = resultTexts(records).join('\n')
+  check('the per-light result names its sheet', /per-light sheet/i.test(results), results.slice(0, 400))
+  check('the turntable result names its four views', /turntable sheet \(4 views\)/i.test(results), results.slice(0, 400))
+  check(
+    'the diff result reports the comparison',
+    /diff against\s+(previous|rev:?\s?\d+|frame:[0-9a-f]+)/i.test(results) && /% changed/i.test(results),
+    results.slice(0, 400),
+  )
+  check('the diff result carries its note line', /\bDiff:\s/.test(results), results.slice(0, 400))
+  check(
+    'the model answered the deep-look turn',
+    (countTypes(records)['assistant/message'] ?? 0) > (turnsBefore['assistant/message'] ?? 0),
+    `${turnsBefore['assistant/message'] ?? 0} -> ${countTypes(records)['assistant/message'] ?? 0} assistant messages`,
+  )
+
+  // Frames: the PNGs on disk and the index that says why each was written.
+  await waitFor(() => {
+    const now = listFrames()
+    return now.length > framesBefore.length ? now : null
+  }, 30_000, 500)
+  const freshFrames = freshFramesSince(framesBefore)
+  check(
+    'the deep looks persisted PNG frames',
+    freshFrames.length >= 2,
+    `${framesBefore.length} -> ${framesBefore.length + freshFrames.length} frames`,
+  )
+  check(
+    'every new frame is a valid PNG',
+    freshFrames.length > 0 && freshFrames.every((info) => info.ok),
+    freshFrames.map((info) => `${info.width}x${info.height} ${info.file}`).join(', ') || 'no new frame',
+  )
+  const index = frameIndex(sid)
+  const infoByPath = new Map(freshFrames.map((info) => [info.file, info]))
+  const indexed = (source) => index.filter((record) => record.source === source && infoByPath.has(record.path))
+  const lookRecords = indexed('look')
+  const diffRecords = indexed('diff')
+  const sourceText = `sources [${index.map((record) => record.source).join(', ')}]`
+  check('the frame index records the contact sheets as look frames', lookRecords.length > 0, sourceText)
+  check('the frame index records the diff sheet as a diff frame', diffRecords.length > 0, sourceText)
+  // The capture options in the index say which sheet is which, so the dimension
+  // check below can name the one it measured.
+  const perLightRecords = lookRecords.filter((record) => record.options?.debug === 'per-light')
+  const turntableRecords = lookRecords.filter((record) => record.options?.angles === 'turntable')
+  check(
+    'the per-light sheet is indexed with its capture options',
+    perLightRecords.length > 0,
+    `look options [${lookRecords.map((record) => JSON.stringify(record.options)).join(', ')}]`,
+  )
+  check(
+    'the turntable sheet is indexed with its capture options',
+    turntableRecords.length > 0,
+    `look options [${lookRecords.map((record) => JSON.stringify(record.options)).join(', ')}]`,
+  )
+  const widerThanTall = (records) => records.filter((record) => {
+    const info = infoByPath.get(record.path)
+    return info !== undefined && info.ok && info.width > info.height
+  })
+  const perLightSheets = widerThanTall(perLightRecords)
+  const diffSheets = widerThanTall(diffRecords)
+  const sizeText = (records) => JSON.stringify(records.map((record) => {
+    const info = infoByPath.get(record.path)
+    return { path: record.path, width: info?.width, height: info?.height }
+  }))
+  // A per-light sheet is one tile per caster (the default rig has one), and a
+  // single tile keeps the panel's aspect plus a title/caption strip, so it can be
+  // square or taller than wide in a portrait panel; only its existence and size
+  // are asserted. A 2x2 turntable grid has the same caveat. The 3-column diff
+  // sheet is landscape by construction.
+  const perLightSized = perLightRecords.filter((record) => infoByPath.get(record.path)?.ok === true)
+  check('the per-light contact sheet is a valid sized PNG', perLightSized.length === perLightRecords.length && perLightRecords.length > 0, sizeText(perLightRecords))
+  check('the diff sheet is wider than tall', diffSheets.length > 0, sizeText(diffSheets))
+
+  const transcript = await transcriptText()
+  await shot(page, 'c-10-deep')
+  report.phases.deep = {
+    sessionId: sid,
+    elapsedMs: Date.now() - t0,
+    newSession: fresh,
+    turnStarted: started.ok,
+    lookCalls: lookCalls.map((call) => call.args),
+    perLightCalls: perLight.length,
+    turntableCalls: turntable.length,
+    diffCalls: diffCalls.length,
+    frames: freshFrames.map((info) => info.file),
+    index: index.slice(0, 8),
+    pngs: freshFrames,
+    sheets: {
+      perLight: perLightRecords.length,
+      turntable: turntableRecords.length,
+      widerThanTall: { perLight: perLightSheets.length, diff: diffSheets.length },
+    },
+    tab: { sessionId: dom.sessionId, view: dom.view, meta: dom.meta },
+    transcriptTail: transcript.slice(-800),
+  }
+  return sid
+}
+
+// ---------------------------------------------------------------------------
+// phase: dryrun
+// ---------------------------------------------------------------------------
+/**
+ * The dry-run loop: the model previews a batch without committing it, then draws
+ * for real. The board document is the witness — a dry run that mutated would
+ * leave twice the shapes, and a preview is only useful if the index says its PNG
+ * was rendered from the uncommitted document.
+ */
+async function phaseDryrun() {
+  await openApp()
+  const fresh = await newSession()
+  const sid = fresh.created ? fresh.after : ((await mainSessionId()) ?? fresh.before)
+  if (sid === null) throw new Error('no main session after 新建会话')
+  if ((await mainSessionId()) !== sid) {
+    const selected = await selectSession(sid)
+    if (!selected) throw new Error(`could not select the dry-run conversation ${sid}`)
+  }
+  const dom = await openWhiteboardTab()
+  if (dom.sessionId !== sid) throw new Error(`the tab is bound to ${dom.sessionId ?? 'none'}, expected ${sid}`)
+
+  const framesBefore = listFrames()
+  const boardBefore = boardCounts(readBoardDoc(sid))
+  const turnsBefore = countTypes(sessionRecords(sid))
+  const t0 = Date.now()
+  await sendFromMainComposer(opts.dryrunPrompt)
+  const started = await waitFor(() => {
+    const counts = countTypes(sessionRecords(sid))
+    return (counts['turn/start'] ?? 0) > (turnsBefore['turn/start'] ?? 0) ? counts : null
+  }, 60_000, 500)
+  check(
+    'dryrun turn started',
+    started.ok,
+    started.ok ? `turn/start ${started.value['turn/start']} (${started.elapsedMs} ms)` : 'no turn/start within 60 s',
+  )
+  const idle = await waitForIdle(sid, opts.timeoutMs)
+  check(
+    'dryrun turn finished',
+    idle.ok,
+    `turn/start ${idle.starts} / turn/end ${idle.ends} (~${idle.elapsedMs} ms)`,
+  )
+
+  const records = sessionRecords(sid)
+  const drawCalls = toolCallDetails(records).filter((call) => call.name === 'whiteboard_draw')
+  check(
+    'whiteboard_draw was called',
+    drawCalls.length > 0,
+    drawCalls.length > 0
+      ? `${drawCalls.length} whiteboard_draw call(s)`
+      : `no whiteboard_draw in [${[...new Set(toolCalls(records))].slice(0, 12).join(', ')}]`,
+  )
+  const dryCalls = drawCalls.filter((call) => call.args.dryRun === true)
+  const committedCalls = drawCalls.filter((call) => call.args.dryRun !== true)
+  check(
+    'a dryRun draw was requested',
+    dryCalls.length > 0,
+    JSON.stringify(drawCalls.map((call) => ({ dryRun: call.args.dryRun ?? false }))),
+  )
+  check('a committed draw followed the preview', committedCalls.length > 0, `dry ${dryCalls.length}, committed ${committedCalls.length}`)
+  const firstDry = drawCalls.findIndex((call) => call.args.dryRun === true)
+  check(
+    'the committed draw came after the dry run',
+    firstDry >= 0 && drawCalls.some((call, index) => index > firstDry && call.args.dryRun !== true),
+    `draw order [${drawCalls.map((call) => (call.args.dryRun === true ? 'dry' : 'commit')).join(', ')}]`,
+  )
+
+  const results = resultTexts(records).join('\n')
+  check('the dry-run result says nothing was committed', /nothing was committed/i.test(results), results.slice(0, 400))
+  check('the dry-run result describes the hypothetical change', /would add|would update|would remove/i.test(results), results.slice(0, 400))
+  check(
+    'the dry-run result names the preview PNG',
+    /Preview:\s*\S+\.png/.test(results) && /\(dry run\)/i.test(results),
+    results.slice(0, 400),
+  )
+
+  const freshFrames = freshFramesSince(framesBefore)
+  const index = frameIndex(sid)
+  const previewRecords = index.filter((record) => record.source === 'preview')
+  check(
+    'the frame index records the preview frame',
+    previewRecords.length > 0,
+    `sources [${index.map((record) => record.source).join(', ')}]`,
+  )
+  const previewInfo = previewRecords.length === 0 ? null : pngInfo(previewRecords[0].path)
+  check(
+    'the preview frame is a valid PNG',
+    previewInfo?.ok === true,
+    previewInfo === null ? 'no preview record' : `${previewInfo.width}x${previewInfo.height} ${previewInfo.file}`,
+  )
+  check(
+    'a preview frame was written before the committed draw',
+    freshFrames.length >= 1 && previewRecords.some((record) => freshFrames.some((info) => info.file === record.path)),
+    `${freshFrames.length} new frame(s)`,
+  )
+
+  // The document is the decisive witness: a dry run that committed would show the
+  // prototype shapes twice. Count what the committed calls would add.
+  const settled = await settleBoard(sid, 1500, 20_000)
+  const expectedShapes = boardBefore.shapes + committedCalls.reduce((sum, call) => sum + addedShapes(call), 0)
+  check(
+    'a dry run committed nothing: the board holds only the committed draws',
+    settled.shapes === expectedShapes,
+    `board ${settled.shapes} shapes, expected ${expectedShapes} (rev ${boardBefore.rev} -> ${settled.rev})`,
+  )
+  check(
+    'the committed draw reached the board document',
+    committedCalls.length > 0 && settled.shapes > boardBefore.shapes,
+    `${boardBefore.shapes} -> ${settled.shapes} shapes`,
+  )
+  check(
+    'the tab agrees with the document',
+    (await waitTabCount(settled.shapes)).ok,
+    `tab count vs ${settled.shapes} shapes`,
+  )
+
+  const transcript = await transcriptText()
+  await shot(page, 'c-11-dryrun')
+  report.phases.dryrun = {
+    sessionId: sid,
+    elapsedMs: Date.now() - t0,
+    newSession: fresh,
+    turnStarted: started.ok,
+    drawCalls: drawCalls.map((call) => ({ dryRun: call.args.dryRun === true, adds: addedShapes(call) })),
+    dryRunCalls: dryCalls.length,
+    committedCalls: committedCalls.length,
+    frames: freshFrames.map((info) => info.file),
+    index: index.slice(0, 8),
+    preview: previewInfo,
+    board: { before: boardBefore, after: settled, expectedShapes },
+    tab: { sessionId: dom.sessionId, view: dom.view, meta: dom.meta },
+    transcriptTail: transcript.slice(-800),
+  }
+  return sid
+}
+
+// ---------------------------------------------------------------------------
 // run
 // ---------------------------------------------------------------------------
 // Sampled before and after the phases: if the dev Host is restarted underneath a
@@ -1797,6 +2194,8 @@ try {
   if (RUN.includes('regress')) await phaseRegress()
   if (RUN.includes('tools')) await phaseTools()
   if (RUN.includes('look')) mainSid = await phaseLook()
+  if (RUN.includes('deep')) mainSid = await phaseDeep()
+  if (RUN.includes('dryrun')) mainSid = await phaseDryrun()
 } catch (err) {
   check(`phase ${opts.phase} completed`, false, err.stack?.split('\n').slice(0, 3).join(' | ') ?? String(err))
   try {

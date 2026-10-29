@@ -24,16 +24,19 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import {
-  applyBoardEvent, BOARD_EXTENT, describeBoard, DRAW_EVENT, MAX_OBJECTS, MAX_SHAPES,
-  PALETTE_TOKENS, SCENE_EVENT, shapeIds,
-  type ArrowShape, type BoardState, type DrawEvent, type DrawOp, type EllipseShape,
+  applyBoardEvent, BOARD_EXTENT, describeBoard, DRAW_EVENT, lightCastsShadow, MAX_OBJECTS, MAX_SHAPES,
+  PALETTE_TOKENS, SCENE_EVENT, shadowCasters, shapeIds,
+  type ArrowShape, type BoardMode, type BoardState, type DrawEvent, type DrawOp, type EllipseShape,
   type Geometry3D, type Light3D, type LightKind, type LineShape, type Object3D, type Object3DOp,
   type PaletteToken, type PathShape, type PolylineShape, type RectShape,
   type Scene3DEvent, type Shape2D, type ShapePatch, type ShapeStyle, type TextShape, type Vec2, type Vec3,
   type View3DPatch,
 } from './scene.ts'
-import { DRAW_TOOL, API_TOOL, HISTORY_TOOL, LOOK_TOOL, READ_TOOL, SCENE_TOOL, UNDO_TOOL, type CaptureOptions } from './shared.ts'
-import type { BoardStore } from './board-store.ts'
+import {
+  DRAW_TOOL, API_TOOL, HISTORY_TOOL, LOOK_TOOL, READ_TOOL, SCENE_TOOL, UNDO_TOOL,
+  type CaptureAnswer, type CaptureBaseline, type CaptureDiff, type CaptureOptions,
+} from './shared.ts'
+import type { BoardSnapshot, BoardStore } from './board-store.ts'
 import type { AttachedImage, CaptureService, FrameStore, SavedFrame } from './capture.ts'
 import { buildManifest } from './manifest.ts'
 
@@ -463,6 +466,31 @@ function unknownId(tool: string, label: string, id: string, board: BoardState): 
     + 'The whole batch was rejected — read the board with whiteboard_read and reuse an exact id from there.')
 }
 
+/** Output declaration of an inline image attachment, shared by look and dry run. */
+const IMAGE_OUTPUT = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    attachmentId: { type: 'string', required: true },
+    mediaType: { type: 'string', enum: ['image/png'], required: true },
+    bytes: { type: 'integer', required: true },
+    width: { type: 'integer', required: true },
+    height: { type: 'integer', required: true },
+    name: { type: 'string' },
+  },
+} as const
+
+/** Output declaration of one objective board check. */
+const CHECK_OUTPUT = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    id: { type: 'string', required: true },
+    pass: { type: 'boolean', required: true },
+    detail: { type: 'string', required: true },
+  },
+} as const
+
 /** Shared output declaration: the compact result every batch tool returns. */
 const BATCH_OUTPUT = {
   type: 'object',
@@ -478,8 +506,45 @@ const BATCH_OUTPUT = {
       type: 'string',
       description: 'Absolute PNG path of a frame captured after this call, when the 画板 panel was on screen.',
     },
+    preview: {
+      type: 'object',
+      additionalProperties: false,
+      description: 'Dry run only: the saved frame of the uncommitted document that would have been committed.',
+      properties: {
+        path: { type: 'string', required: true },
+        hash: { type: 'string', required: true },
+        width: { type: 'integer', required: true },
+        height: { type: 'integer', required: true },
+        mode: { type: 'string', enum: ['2d', '3d'], required: true },
+        rev: { type: 'integer', required: true },
+      },
+    },
+    image: {
+      ...IMAGE_OUTPUT,
+      description: 'Dry run only: the preview as an inline image, when the host can attach one.',
+    },
+    checks: {
+      type: 'array',
+      items: CHECK_OUTPUT,
+      description: 'Dry run only: the objective checks run against the hypothetical board.',
+    },
+    warnings: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Dry run only: failed check details, in check order.',
+    },
   },
 } as const
+
+/** One dry-run preview of an uncommitted document. */
+interface PreviewResult {
+  path: string
+  hash: string
+  width: number
+  height: number
+  mode: BoardMode
+  rev: number
+}
 
 /** One batch result; structurally the canonical output value above. */
 interface BatchResult {
@@ -490,14 +555,32 @@ interface BatchResult {
   counts: string
   summary: string
   frame?: string
+  preview?: PreviewResult
+  image?: AttachedImage
+  checks?: BoardCheck[]
+  warnings?: string[]
 }
 
-/** Render one batch result as its single model-facing line. */
-function batchRender(_args: unknown, value: Readonly<BatchResult>): { type: 'text'; text: string }[] {
-  const frame = value.frame === undefined
-    ? ''
-    : ` Frame captured: ${value.frame} (open it with read_image, or call whiteboard_look for measurements).`
-  return [{ type: 'text', text: value.summary + frame }]
+/** Render one batch result as text plus the dry-run image. */
+function batchRender(_args: unknown, value: Readonly<BatchResult>): ContentBlock[] {
+  const head: string[] = [value.summary]
+  if (value.preview !== undefined) {
+    head.push(` Preview: ${value.preview.path} (${value.preview.width}×${value.preview.height}px, `
+      + `${value.preview.mode.toUpperCase()}, board rev ${value.preview.rev}); nothing was committed.`)
+  } else if (value.frame !== undefined) {
+    head.push(` Frame captured: ${value.frame} (open it with read_image, or call whiteboard_look for measurements).`)
+  }
+  if (value.checks !== undefined && value.checks.length > 0) {
+    const failed = value.checks.filter(check => !check.pass)
+    head.push(`\nChecks: ${value.checks.length - failed.length}/${value.checks.length} passed`
+      + `${failed.length === 0 ? '.' : `; failing: ${failed.map(check => check.id).join(', ')}.`}`)
+  }
+  if (value.warnings !== undefined && value.warnings.length > 0) {
+    head.push(`\nWarnings:\n- ${value.warnings.join('\n- ')}`)
+  }
+  const blocks: ContentBlock[] = [{ type: 'text', text: head.join('') }]
+  if (value.image !== undefined) blocks.push({ type: 'image', attachment: value.image })
+  return blocks
 }
 
 /** Describe a change list for the result line. */
@@ -508,6 +591,18 @@ function changeSummary(tool: string, added: string[], updated: string[], removed
   if (removed.length > 0) parts.push(`removed ${removed.join(', ')}`)
   const changed = parts.length === 0 ? 'no changes' : parts.join('; ')
   return `${tool}: ${changed} — ${counts}.`
+}
+
+/** Describe a hypothetical change list for a dry run, which commits nothing. */
+function dryRunSummary(
+  tool: string, added: string[], updated: string[], removed: string[], counts: string,
+): string {
+  const parts: string[] = []
+  if (added.length > 0) parts.push(`would add ${added.join(', ')}`)
+  if (updated.length > 0) parts.push(`would update ${updated.join(', ')}`)
+  if (removed.length > 0) parts.push(`would remove ${removed.join(', ')}`)
+  const changed = parts.length === 0 ? 'would change nothing' : parts.join('; ')
+  return `${tool} (dry run): ${changed} — ${counts}; nothing was committed.`
 }
 
 /** Axis-aligned 2D bounds, in logical board units. */
@@ -615,24 +710,6 @@ function objectBounds(object: Object3D): Bounds3 {
   }
 }
 
-/** Index of the first directional light, or -1. */
-function firstDirectionalIndex(lights: readonly Light3D[]): number {
-  return lights.findIndex(light => light.kind === 'directional')
-}
-
-/**
- * Whether one light casts, applying the documented default: an explicit
- * `castShadow` wins; otherwise only the first directional light casts.
- * @param light - light to inspect.
- * @param index - its index in the rig.
- * @param lights - the whole rig.
- * @returns whether the renderer arms this light for shadows.
- */
-function castsShadow(light: Light3D, index: number, lights: readonly Light3D[]): boolean {
-  if (typeof light.castShadow === 'boolean') return light.castShadow
-  return light.kind === 'directional' && index === firstDirectionalIndex(lights)
-}
-
 /**
  * Model-facing warnings for the current board: the things a picture would make
  * obvious but a bare id list would not.
@@ -675,10 +752,8 @@ function boardChecks(board: BoardState): BoardCheck[] {
   })
 
   const scene = board.scene
-  const casters = scene.lights
-    .map((light, index) => ({ light, index }))
-    .filter(({ light, index }) => castsShadow(light, index, scene.lights))
-  const casterNames = casters.map(({ index }) => `light #${index + 1}`).join(', ')
+  const casters = shadowCasters(scene.lights)
+  const casterNames = casters.map(index => `light #${index + 1}`).join(', ')
   checks.push({
     id: 'shadow.present',
     pass: casters.length > 0,
@@ -740,24 +815,220 @@ function warningsOf(checks: readonly BoardCheck[]): string[] {
  * @param services - capture services, when wired.
  * @param sessionId - board key.
  * @param mode - the surface the call just wrote.
+ * @param rev - revision the frame shows (the mutation's own revision).
  * @returns the saved PNG path, or undefined.
  */
 async function autoFrame(
-  services: BoardToolServices | undefined, sessionId: string, mode: '2d' | '3d',
+  services: BoardToolServices | undefined, sessionId: string, mode: BoardMode, rev: number,
 ): Promise<string | undefined> {
   if (services === undefined || !services.captures.hasViewer(sessionId)) return undefined
+  const options: CaptureOptions = { mode, overlay: 'none', debug: 'lit', maxWidth: 768 }
   try {
-    const answer = await services.captures.request(
-      sessionId,
-      { mode, overlay: 'none', debug: 'lit', maxWidth: 768 },
-      1_500,
-    )
-    const saved = await services.frames.save(sessionId, answer.png)
+    const answer = await services.captures.request(sessionId, options, 1_500)
+    const saved = await services.frames.save(sessionId, answer.png, {
+      width: answer.width,
+      height: answer.height,
+      mode: answer.mode,
+      rev,
+      source: 'auto',
+      ...(answer.camera === undefined ? {} : { camera: answer.camera }),
+      options,
+    })
     return saved.path
   } catch {
     // A frame is a convenience after a mutation; never fail the mutation for it.
     return undefined
   }
+}
+
+/** One rendered dry-run preview: the saved frame and its inline attachment. */
+interface PreviewCapture {
+  /** The persisted PNG. */
+  saved: SavedFrame
+  /** What the panel answered, for size/mode metadata. */
+  answer: CaptureAnswer
+  /** The inline image block, when the host can attach one. */
+  image?: AttachedImage
+}
+
+/**
+ * Render one uncommitted document inside the open panel and save it.
+ *
+ * A dry run deliberately does not fall back to "text only": the whole point is
+ * to see the batch before it exists, so a missing panel is an error instead of a
+ * silent success. Nothing here touches the store.
+ * @param services - capture services, when wired.
+ * @param tool - tool name for a readable error.
+ * @param sessionId - board key.
+ * @param mode - the document's own surface.
+ * @param board - the hypothetical (uncommitted) document.
+ * @param rev - revision the document was derived from.
+ * @returns the saved preview and its optional attachment.
+ */
+async function previewFrame(
+  services: BoardToolServices | undefined,
+  tool: string,
+  sessionId: string,
+  mode: BoardMode,
+  board: BoardState,
+  rev: number,
+): Promise<PreviewCapture> {
+  if (services === undefined) {
+    throw new Error(`${tool} dry run needs the capture channel to render the preview, and this host has it not wired; `
+      + 'use the normal call with the 画板 panel open, or whiteboard_read for the current board')
+  }
+  if (!services.captures.hasViewer(sessionId)) {
+    throw new Error(`${tool} dry run renders the preview inside the open 画板 panel, and no panel is on screen; `
+      + 'open the 画板 tab in the right sidebar and retry. Nothing was committed.')
+  }
+  const options: CaptureOptions = { mode, overlay: 'ids', debug: 'lit', maxWidth: 1_024 }
+  let answer: CaptureAnswer
+  try {
+    answer = await services.captures.request(sessionId, options, 4_000, { preview: board })
+  } catch (error) {
+    throw new Error(`${tool} dry run could not render the preview, so nothing was committed: `
+      + `${error instanceof Error ? error.message : String(error)}`)
+  }
+  const saved = await services.frames.save(sessionId, answer.png, {
+    width: answer.width,
+    height: answer.height,
+    mode: answer.mode,
+    rev,
+    source: 'preview',
+    ...(answer.camera === undefined ? {} : { camera: answer.camera }),
+    options,
+  })
+  const image = await services.attachImage(saved, `whiteboard-preview-${saved.hash}.png`)
+  return { saved, answer, ...(image === undefined ? {} : { image }) }
+}
+
+/** The three `diffAgainst` forms, spelled for a model-facing error. */
+const DIFF_FORMS = '"previous" (the document before the latest mutation), "rev:<n>" (a retained document '
+  + 'revision), or a 6–16 character frame-hash prefix'
+
+/** A resolved `diffAgainst` selector: the wire baseline plus the label to report. */
+interface ResolvedBaseline {
+  /** The baseline the capture request carries. */
+  baseline: CaptureBaseline
+  /** Label for the result line (`previous`, `rev:12`, `frame:ab12`). */
+  label: string
+  /** Surface the baseline shows; must equal the current board mode. */
+  mode: BoardMode
+}
+
+/** Whether a board document has no content on either surface. */
+function emptyDocument(board: BoardState): boolean {
+  return board.canvas.shapes.length === 0 && board.scene.objects.length === 0
+}
+
+/**
+ * Point an empty earlier document at the surface being compared.
+ *
+ * A board that has never been drawn on is surface-agnostic: the first 3D batch
+ * on a fresh board has a 2D `previous` document, but "empty before this edit" is
+ * exactly what an empty 3D scene also means. Non-empty documents keep their
+ * surface, so a real 2D-versus-3D comparison is still refused.
+ * @param board - earlier document.
+ * @param mode - surface of the current board.
+ * @returns the same document, relabelled when it is empty.
+ */
+function onSurface(board: BoardState, mode: BoardMode): BoardState {
+  return board.mode === mode || !emptyDocument(board) ? board : { ...board, mode }
+}
+
+/** Retained document revisions, for an error that also says what is available. */
+function availableRevisions(store: BoardStore, sessionId: string): string {
+  const retained = store.history(sessionId).map(entry => `rev:${entry.rev}`)
+  const current = store.read(sessionId).rev
+  return `${retained.length === 0 ? 'none' : retained.join(', ')} (current rev ${current})`
+}
+
+/**
+ * Resolve one `diffAgainst` selector into a wire baseline.
+ *
+ * `previous` and `rev:<n>` come from the in-memory undo history and are compared
+ * as documents; a hash selects a stored frame and is compared as an image.
+ * @param store - board store (history access).
+ * @param frames - frame store (hash lookup).
+ * @param sessionId - board key.
+ * @param selector - the model's argument, already trimmed.
+ * @param mode - surface of the current board, used to relabel an empty baseline.
+ * @returns the baseline and its label.
+ * @throws a model-facing error naming the accepted forms and what is available.
+ */
+async function resolveBaseline(
+  store: BoardStore,
+  frames: FrameStore,
+  sessionId: string,
+  selector: string,
+  mode: BoardMode,
+): Promise<ResolvedBaseline> {
+  if (selector === 'previous') {
+    const previous = store.previous(sessionId)
+    if (previous === undefined) {
+      throw new Error(`${LOOK_TOOL}: diffAgainst "previous" needs the document before the latest mutation, but the `
+        + `in-memory history is empty (or the Host restarted). Retained revisions: ${availableRevisions(store, sessionId)}. `
+        + `Accepted forms: ${DIFF_FORMS}.`)
+    }
+    const board = onSurface(previous.board, mode)
+    return {
+      baseline: { kind: 'document', rev: previous.rev, label: 'previous', board },
+      label: 'previous',
+      mode: board.mode,
+    }
+  }
+  const revisionMatch = /^rev:(\d{1,9})$/.exec(selector)
+  if (revisionMatch !== null) {
+    const wanted = Number(revisionMatch[1])
+    const revision = store.revision(sessionId, wanted)
+    if (revision === undefined) {
+      throw new Error(`${LOOK_TOOL}: diffAgainst "rev:${wanted}" is not retained; the undo history is memory-only and `
+        + `resets when the Host restarts. Retained revisions: ${availableRevisions(store, sessionId)}. `
+        + `Accepted forms: ${DIFF_FORMS}.`)
+    }
+    const board = onSurface(revision.board, mode)
+    return {
+      baseline: { kind: 'document', rev: revision.rev, label: `rev:${revision.rev}`, board },
+      label: `rev:${revision.rev}`,
+      mode: board.mode,
+    }
+  }
+  if (/^[0-9a-fA-F]{6,16}$/.test(selector)) {
+    const record = await frames.byHash(sessionId, selector)
+    if (record === undefined) {
+      const saved = await frames.list(sessionId, 8)
+      throw new Error(`${LOOK_TOOL}: diffAgainst ${JSON.stringify(selector)} matches no saved frame. Available frames: `
+        + `${saved.length === 0 ? 'none' : saved.map(frame => frame.hash.slice(0, 8)).join(', ')}. `
+        + `Accepted forms: ${DIFF_FORMS}.`)
+    }
+    const stored = await frames.read(sessionId, record.hash)
+    if (stored === undefined) {
+      throw new Error(`${LOOK_TOOL}: diffAgainst ${JSON.stringify(selector)} resolves to frame ${record.hash}, but its `
+        + 'PNG is no longer readable (the index and the files disagree). Save a new frame with whiteboard_look and '
+        + 'diff against that.')
+    }
+    return {
+      baseline: {
+        kind: 'image',
+        rev: record.rev,
+        label: `frame:${record.hash}`,
+        png: stored.data.toString('base64'),
+        width: record.width,
+        height: record.height,
+        mode: record.mode,
+        ...(record.camera === undefined ? {} : { camera: record.camera }),
+      },
+      label: `frame:${record.hash}`,
+      mode: record.mode,
+    }
+  }
+  throw new Error(`${LOOK_TOOL}: diffAgainst must be ${DIFF_FORMS}; got ${JSON.stringify(selector)}.`)
+}
+
+/** Format a 0..1 changed ratio as the percentage the summary line repeats. */
+function formatRatio(ratio: number): string {
+  const percent = Math.max(0, Math.min(1, ratio)) * 100
+  return `${percent >= 10 ? percent.toFixed(0) : percent.toFixed(1)}%`
 }
 
 /** Output declaration of one look: the frame, the optional inline image, and the notes. */
@@ -781,30 +1052,44 @@ const LOOK_OUTPUT = {
       },
     },
     image: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        attachmentId: { type: 'string', required: true },
-        mediaType: { type: 'string', enum: ['image/png'], required: true },
-        bytes: { type: 'integer', required: true },
-        width: { type: 'integer', required: true },
-        height: { type: 'integer', required: true },
-        name: { type: 'string' },
-      },
+      ...IMAGE_OUTPUT,
+      description: 'The frame as an inline image, when the host can attach one; the PNG path still works.',
     },
     summary: { type: 'string', required: true },
     warnings: { type: 'array', items: { type: 'string' }, required: true },
     checks: {
       type: 'array',
       required: true,
-      items: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          id: { type: 'string', required: true },
-          pass: { type: 'boolean', required: true },
-          detail: { type: 'string', required: true },
+      items: CHECK_OUTPUT,
+    },
+    tiles: {
+      type: 'array',
+      items: { type: 'string' },
+      description: 'Tile captions when the PNG is a contact sheet (per-light or turntable).',
+    },
+    diff: {
+      type: 'object',
+      additionalProperties: false,
+      description: 'Pixel comparison against the baseline diffAgainst named; absent for a plain look.',
+      properties: {
+        kind: { type: 'string', enum: ['document', 'image'], required: true },
+        label: { type: 'string', required: true },
+        rev: { type: 'integer', required: true },
+        changedPixels: { type: 'integer', required: true },
+        changedRatio: { type: 'number', required: true },
+        bounds: {
+          type: 'object',
+          additionalProperties: false,
+          description: 'Bounds of the changed pixels, in new-frame pixels; absent when nothing changed.',
+          properties: {
+            x: { type: 'number', required: true },
+            y: { type: 'number', required: true },
+            width: { type: 'number', required: true },
+            height: { type: 'number', required: true },
+          },
         },
+        comparable: { type: 'boolean', required: true },
+        note: { type: 'string', required: true },
       },
     },
     details: { type: 'string', required: true },
@@ -827,20 +1112,26 @@ interface LookResult {
   summary: string
   warnings: string[]
   checks: BoardCheck[]
+  tiles?: string[]
+  diff?: CaptureDiff
   details: string
 }
 
 /** Render one look as text plus the image itself when an attachment exists. */
 function lookRender(_args: unknown, value: Readonly<LookResult>): ContentBlock[] {
-  const passed = value.checks.filter(check => check.pass).length
-  const checkText = value.checks.length === 0 ? '' : `\nChecks: ${passed}/${value.checks.length} passed.`
+  const failed = value.checks.filter(check => !check.pass)
+  const checkText = value.checks.length === 0
+    ? ''
+    : `\nChecks: ${value.checks.length - failed.length}/${value.checks.length} passed`
+      + `${failed.length === 0 ? '.' : `; failing: ${failed.map(check => check.id).join(', ')}.`}`
+  const diffText = value.diff === undefined ? '' : `\nDiff: ${value.diff.note}`
   const warningText = value.warnings.length === 0 ? '' : `\nWarnings:\n- ${value.warnings.join('\n- ')}`
   const imageHint = value.image === undefined
     ? `\nPNG: ${value.frame.path} — open it with read_image.`
     : ''
   const blocks: ContentBlock[] = [{
     type: 'text',
-    text: `${value.summary}${checkText}${warningText}${imageHint}\n${value.details}`,
+    text: `${value.summary}${checkText}${diffText}${warningText}${imageHint}\n${value.details}`,
   }]
   if (value.image !== undefined) blocks.push({ type: 'image', attachment: value.image })
   return blocks
@@ -1107,7 +1398,8 @@ export function createBoardTools(
     name: DRAW_TOOL,
     description:
       'Draw a batch of ops on the conversation board (2D); returns the ids it applied. Call whiteboard_api for the live '
-      + 'field spec, defaults, palette and batch limit.',
+      + 'field spec, defaults, palette and batch limit. Pass dryRun: true to render the batch as a preview without '
+      + 'committing anything.',
     parameters: {
       ops: {
         type: 'array',
@@ -1164,6 +1456,12 @@ export function createBoardTools(
           },
         },
       },
+      dryRun: {
+        type: 'boolean',
+        description: 'Preview without committing (default false): renders the hypothetical board in the open 画板 '
+          + 'panel and returns the frame, checks and hypothetical counts; the store, undo history and revision are '
+          + 'left untouched.',
+      },
     },
     output: { schema: BATCH_OUTPUT, render: batchRender },
     execute: async (args, exec) => {
@@ -1180,9 +1478,9 @@ export function createBoardTools(
       const added: string[] = []
       const updated: string[] = []
       const removed: string[] = []
-      // Build inside the store's reducer: the batch is validated against the
-      // newest board and applies atomically (or not at all).
-      const snapshot = await store.mutate(sessionId, (board) => {
+      // Build the batch as a pure fold so a dry run can reuse it: the batch is
+      // validated against one board and applies atomically (or not at all).
+      const fold = (board: BoardState): BoardState => {
         const ops: DrawOp[] = []
         const ids = new IdAllocator(board)
         /** Ids this board knows once the batch so far is folded. */
@@ -1233,9 +1531,42 @@ export function createBoardTools(
         }
         const payload: DrawEvent = { ops }
         return applyBoardEvent(board, DRAW_EVENT, payload)
-      })
+      }
+      const dryRun = args.dryRun === true
+      const before = dryRun ? store.read(sessionId) : undefined
+      let snapshot: BoardSnapshot
+      if (before === undefined) {
+        snapshot = await store.mutate(sessionId, fold)
+      } else {
+        // A dry run renders the hypothetical document; the store is untouched.
+        snapshot = { rev: before.rev, board: fold(before.board) }
+      }
       const counts = census(snapshot.board)
-      const frame = await autoFrame(services, sessionId, '2d')
+      if (dryRun) {
+        const preview = await previewFrame(services, DRAW_TOOL, sessionId, '2d', snapshot.board, snapshot.rev)
+        const checks = boardChecks(snapshot.board)
+        const previewResult: BatchResult = {
+          tool: DRAW_TOOL,
+          added,
+          updated,
+          removed,
+          counts,
+          summary: dryRunSummary(DRAW_TOOL, added, updated, removed, counts),
+          preview: {
+            path: preview.saved.path,
+            hash: preview.saved.hash,
+            width: preview.answer.width,
+            height: preview.answer.height,
+            mode: preview.answer.mode,
+            rev: snapshot.rev,
+          },
+          checks,
+          warnings: warningsOf(checks),
+          ...(preview.image === undefined ? {} : { image: preview.image }),
+        }
+        return previewResult
+      }
+      const frame = await autoFrame(services, sessionId, '2d', snapshot.rev)
       const result: BatchResult = {
         tool: DRAW_TOOL,
         added,
@@ -1253,7 +1584,8 @@ export function createBoardTools(
     name: SCENE_TOOL,
     description:
       'Add or edit objects in the board 3D scene; returns the ids it applied. Call whiteboard_api for the live field '
-      + 'spec, camera/lights and batch limit.',
+      + 'spec, camera/lights and batch limit. Pass dryRun: true to render the batch as a preview without committing '
+      + 'anything.',
     parameters: {
       ops: {
         type: 'array',
@@ -1336,6 +1668,12 @@ export function createBoardTools(
           },
         },
       },
+      dryRun: {
+        type: 'boolean',
+        description: 'Preview without committing (default false): renders the hypothetical scene in the open 画板 '
+          + 'panel and returns the frame, checks and hypothetical counts; the store, undo history and revision are '
+          + 'left untouched.',
+      },
     },
     output: { schema: BATCH_OUTPUT, render: batchRender },
     execute: async (args, exec) => {
@@ -1350,7 +1688,8 @@ export function createBoardTools(
       const added: string[] = []
       const updated: string[] = []
       const removed: string[] = []
-      const snapshot = await store.mutate(sessionId, (board) => {
+      // A pure fold, so the normal path commits it and a dry run only renders it.
+      const fold = (board: BoardState): BoardState => {
         const ops: Object3DOp[] = []
         const ids = new IdAllocator(board)
         const byId = new Map(board.scene.objects.map(object => [object.id, object]))
@@ -1401,9 +1740,42 @@ export function createBoardTools(
         }
         const payload: Scene3DEvent = view === undefined ? { ops } : { ops, view }
         return applyBoardEvent(board, SCENE_EVENT, payload)
-      })
+      }
+      const dryRun = args.dryRun === true
+      const before = dryRun ? store.read(sessionId) : undefined
+      let snapshot: BoardSnapshot
+      if (before === undefined) {
+        snapshot = await store.mutate(sessionId, fold)
+      } else {
+        // A dry run renders the hypothetical document; the store is untouched.
+        snapshot = { rev: before.rev, board: fold(before.board) }
+      }
       const counts = census(snapshot.board)
-      const frame = await autoFrame(services, sessionId, '3d')
+      if (dryRun) {
+        const preview = await previewFrame(services, SCENE_TOOL, sessionId, '3d', snapshot.board, snapshot.rev)
+        const checks = boardChecks(snapshot.board)
+        const previewResult: BatchResult = {
+          tool: SCENE_TOOL,
+          added,
+          updated,
+          removed,
+          counts,
+          summary: dryRunSummary(SCENE_TOOL, added, updated, removed, counts),
+          preview: {
+            path: preview.saved.path,
+            hash: preview.saved.hash,
+            width: preview.answer.width,
+            height: preview.answer.height,
+            mode: preview.answer.mode,
+            rev: snapshot.rev,
+          },
+          checks,
+          warnings: warningsOf(checks),
+          ...(preview.image === undefined ? {} : { image: preview.image }),
+        }
+        return previewResult
+      }
+      const frame = await autoFrame(services, sessionId, '3d', snapshot.rev)
       const result: BatchResult = {
         tool: SCENE_TOOL,
         added,
@@ -1451,7 +1823,7 @@ export function createBoardTools(
           camera: board.scene.camera,
           lights: board.scene.lights.map((light, index) => ({
             ...light,
-            casts: castsShadow(light, index, board.scene.lights),
+            casts: lightCastsShadow(board.scene.lights, index),
           })),
           objects: board.scene.objects.map(object => ({ ...object, bounds: objectBounds(object) })),
         },
@@ -1473,7 +1845,8 @@ export function createBoardTools(
     description:
       'Capture what the open 画板 panel shows, as an image plus measurements and warnings. The panel must be on screen; '
       + 'without it use whiteboard_read. overlay "ids" labels every element with its id; debug "shadow-only" hides the lit '
-      + 'surfaces and keeps the shadows, which is how a wrong shadow is identified.',
+      + 'surfaces and keeps the shadows, which is how a wrong shadow is identified; debug "per-light" and angles '
+      + '"turntable" return 3D contact sheets, and diffAgainst compares with an earlier revision or saved frame.',
     parameters: {
       mode: {
         type: 'string',
@@ -1487,8 +1860,21 @@ export function createBoardTools(
       },
       debug: {
         type: 'string',
-        enum: ['lit', 'shadow-only'],
-        description: 'lit is the real picture; shadow-only shows the shadow pass (3D).',
+        enum: ['lit', 'shadow-only', 'per-light'],
+        description: 'lit is the real picture; shadow-only shows the shadow pass; per-light renders one tile per '
+          + 'shadow-casting light as a 3D contact sheet.',
+      },
+      angles: {
+        type: 'string',
+        enum: ['default', 'turntable'],
+        description: 'turntable renders four yaw views around the 3D camera target as one contact sheet; default keeps '
+          + 'the live view.',
+      },
+      diffAgainst: {
+        type: 'string',
+        description: 'Compare with an earlier board instead of just capturing: "previous" (the document before the '
+          + 'latest mutation), "rev:<n>" (a retained revision) or a saved frame hash prefix. Returns a '
+          + 'before/after/changed sheet.',
       },
       maxWidth: {
         type: 'integer',
@@ -1503,17 +1889,84 @@ export function createBoardTools(
         throw new Error(`${LOOK_TOOL}: the capture channel is not wired in this host; use whiteboard_read instead`)
       }
       const snapshot = store.read(sessionId)
-      const options: CaptureOptions = {
-        mode: args.mode ?? 'auto',
-        overlay: args.overlay ?? 'ids',
-        debug: args.debug ?? 'lit',
-        maxWidth: args.maxWidth ?? 1_280,
+      const board = snapshot.board
+      const debug = args.debug ?? 'lit'
+      const perLight = debug === 'per-light'
+      const turntable = args.angles === 'turntable'
+      const requestedDiff = typeof args.diffAgainst === 'string' ? args.diffAgainst.trim() : undefined
+      if (requestedDiff === '') {
+        throw new Error(`${LOOK_TOOL}: diffAgainst must be ${DIFF_FORMS}; got an empty string.`)
       }
-      const answer = await services.captures.request(sessionId, options, 4_000)
-      const saved = await services.frames.save(sessionId, answer.png)
+      const selector = requestedDiff
+
+      // Validate before requesting anything: a wrong mode should not cost a frame.
+      if (perLight && turntable) {
+        throw new Error(`${LOOK_TOOL}: debug "per-light" and angles "turntable" cannot be combined — each already `
+          + 'returns a multi-tile sheet. Ask for one: per-light isolates one shadow-casting light per tile, turntable '
+          + 'orbits the camera.')
+      }
+      if ((perLight || turntable) && board.mode !== '3d') {
+        const rendered = perLight
+          ? 'debug "per-light" renders one frame per shadow-casting light'
+          : 'angles "turntable" renders four views around the camera target'
+        throw new Error(`${LOOK_TOOL}: ${rendered}, which only exists in the 3D scene; the board is on the 2D canvas `
+          + `(rev ${snapshot.rev}). Both contact sheets are 3D-only: draw to the 3D scene with whiteboard_3d, or drop `
+          + 'the option and capture the plain frame.')
+      }
+      let casterCount = 0
+      if (perLight) {
+        casterCount = shadowCasters(board.scene.lights).length
+        if (casterCount === 0) {
+          throw new Error(`${LOOK_TOOL}: debug "per-light" needs at least one light that casts a shadow, and no light in `
+            + 'this scene does. Arm one with whiteboard_3d view.lights: [{kind:"directional", intensity:0, '
+            + 'castShadow:true, position:[…]}] — only directional lights cast shadows, and castShadow:false never does.')
+        }
+      }
+      if (selector !== undefined && (perLight || turntable)) {
+        throw new Error(`${LOOK_TOOL}: diffAgainst cannot be combined with debug "per-light" or angles "turntable" — `
+          + 'a contact sheet is many views and a diff is one before/after pair. Ask for one, not both.')
+      }
+      const resolved = selector === undefined
+        ? undefined
+        : await resolveBaseline(store, services.frames, sessionId, selector, board.mode)
+      if (resolved !== undefined && resolved.mode !== board.mode) {
+        throw new Error(`${LOOK_TOOL}: diffAgainst ${resolved.label} is a ${resolved.mode.toUpperCase()} frame, but the `
+          + `board is now ${board.mode.toUpperCase()}; a diff only compares the same surface. Use a baseline from the `
+          + `${board.mode === '2d' ? '2D canvas' : '3D scene'} history, or skip diffAgainst.`)
+      }
+
+      const options: CaptureOptions = {
+        // A sheet or a diff renders one known document, so it cannot follow the panel.
+        mode: resolved !== undefined || perLight || turntable ? board.mode : (args.mode ?? 'auto'),
+        overlay: args.overlay ?? 'ids',
+        debug,
+        maxWidth: args.maxWidth ?? 1_280,
+        ...(turntable ? { angles: 'turntable' as const } : {}),
+      }
+      const extra: { baseline?: CaptureBaseline } = resolved === undefined ? {} : { baseline: resolved.baseline }
+      const answer = await services.captures.request(sessionId, options, 4_000, extra)
+      // A contact sheet is still a look; only a diff sheet is a comparison.
+      const source = resolved === undefined ? 'look' : 'diff'
+      const saved = await services.frames.save(sessionId, answer.png, {
+        width: answer.width,
+        height: answer.height,
+        mode: answer.mode,
+        rev: snapshot.rev,
+        source,
+        ...(answer.camera === undefined ? {} : { camera: answer.camera }),
+        options,
+      })
       const image = await services.attachImage(saved, `whiteboard-${saved.hash}.png`)
-      const checks = boardChecks(snapshot.board)
+      const checks = boardChecks(board)
       const warnings = warningsOf(checks)
+      const diff = answer.diff
+      const view = resolved !== undefined
+        ? `diff against ${resolved.label}${diff === undefined ? '' : `: ${formatRatio(diff.changedRatio)} changed`}`
+        : turntable
+          ? 'turntable sheet (4 views)'
+          : perLight
+            ? `per-light sheet (${casterCount} caster${casterCount === 1 ? '' : 's'})`
+            : 'panel'
       const details = JSON.stringify({
         rev: snapshot.rev,
         mode: answer.mode,
@@ -1521,9 +1974,15 @@ export function createBoardTools(
         height: answer.height,
         camera: answer.camera ?? null,
         viewport: answer.viewport ?? null,
+        source,
+        ...(resolved === undefined
+          ? {}
+          : { baseline: { kind: resolved.baseline.kind, label: resolved.label, rev: resolved.baseline.rev } }),
+        tiles: answer.tiles ?? null,
+        diff: diff ?? null,
         checks,
       }, null, 2)
-      const summary = `${LOOK_TOOL}: captured the ${answer.mode.toUpperCase()} panel at `
+      const summary = `${LOOK_TOOL}: captured the ${answer.mode.toUpperCase()} ${view} at `
         + `${answer.width}×${answer.height}px (board rev ${snapshot.rev}); `
         + (image === undefined ? 'the PNG is on disk.' : 'the image is attached.')
       const result: LookResult = {
@@ -1542,6 +2001,8 @@ export function createBoardTools(
         checks,
         details,
         ...(image === undefined ? {} : { image }),
+        ...(answer.tiles === undefined ? {} : { tiles: answer.tiles }),
+        ...(diff === undefined ? {} : { diff }),
       }
       return result
     },

@@ -75,6 +75,7 @@ const BOARD_POLICY = [
   'whiteboard_look captures what the open 画板 panel shows: pixels, measurements and warnings (ids can be',
   'overlaid and shadows isolated). It only works while the panel is open. Never open the GUI in a browser:',
   'it is token-fenced and is not your view. whiteboard_read returns the full state without the picture.',
+  'per-light / turntable contact sheets, diffAgainst revisions and dryRun previews check work before committing it.',
   '',
   'CLEAR AND UNDO',
   'Clearing and undoing belong to the user unless they ask; whiteboard_history / whiteboard_undo exist for when',

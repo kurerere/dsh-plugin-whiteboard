@@ -148,6 +148,12 @@ export const LIMITS = {
   points: 400,
   /** Hard plausibility bound on any single 2D coordinate (`±20000`). */
   coordLimit: 20_000,
+  /** Views composed into one `angles: "turntable"` contact sheet (3D only). */
+  turntableViews: 4,
+  /** Tiles composed into one `debug: "per-light"` contact sheet (at most one per light). */
+  perLightTiles: MAX_LIGHTS,
+  /** Largest capture answer the Host accepts, in bytes (8 MB). */
+  answerBytes: 8_000_000,
 } as const
 
 /** The primitive shape of a wire field. */
@@ -305,11 +311,13 @@ export interface ToolInfo {
 export const TOOL_SPECS: Readonly<Record<ToolRole, ToolInfo>> = {
   draw: {
     name: TOOL_NAMES.draw,
-    purpose: 'Append 1–64 2D ops (add/update/remove/clear) to the conversation canvas; returns the ids it applied.',
+    purpose: 'Append 1–64 2D ops (add/update/remove/clear) to the conversation canvas; returns the ids it applied. '
+      + 'dryRun: true renders the batch as a preview without committing.',
   },
   scene3d: {
     name: TOOL_NAMES.scene3d,
-    purpose: 'Append 1–64 3D ops plus an optional camera/light view to the conversation scene; returns the ids it applied.',
+    purpose: 'Append 1–64 3D ops plus an optional camera/light view to the conversation scene; returns the ids it '
+      + 'applied. dryRun: true renders the batch as a preview without committing.',
   },
   read: {
     name: TOOL_NAMES.read,
@@ -317,7 +325,8 @@ export const TOOL_SPECS: Readonly<Record<ToolRole, ToolInfo>> = {
   },
   look: {
     name: TOOL_NAMES.look,
-    purpose: 'Capture what the open panel currently shows, so a drawing can be checked by pixels instead of assumption.',
+    purpose: 'Capture what the open panel currently shows so a drawing can be checked by pixels instead of assumption: '
+      + 'a plain frame, a per-light or turntable 3D contact sheet, or a diff against an earlier revision or frame.',
   },
   api: {
     name: TOOL_NAMES.api,
@@ -1620,8 +1629,11 @@ export interface ToolCallExample {
   args: JsonValue
 }
 
-/** The three examples every manifest carries. */
-export const EXAMPLES: Readonly<Record<'draw' | 'scene3d' | 'fixShadow', ToolCallExample>> = {
+/** Roles of the copyable examples every manifest carries. */
+export type ExampleRole = 'draw' | 'scene3d' | 'fixShadow' | 'diffLook' | 'dryRun'
+
+/** The copyable tool calls every manifest carries. */
+export const EXAMPLES: Readonly<Record<ExampleRole, ToolCallExample>> = {
   draw: {
     tool: TOOL_NAMES.draw,
     note: 'Layer 1 of a flow: container plus its label and the connector out. Send 2–6 ops per call, one '
@@ -1724,6 +1736,42 @@ export const EXAMPLES: Readonly<Record<'draw' | 'scene3d' | 'fixShadow', ToolCal
       },
     },
   },
+  diffLook: {
+    tool: TOOL_NAMES.look,
+    note: 'Diff instead of re-reading the whole picture: "previous" compares with the document before the last '
+      + 'mutation, "rev:12" with a retained revision (memory-only), and a 6–16 char frame hash with a saved PNG. '
+      + 'Both frames must be on the same surface; a plain look is one call without diffAgainst.',
+    accepted: true,
+    args: {
+      diffAgainst: 'previous',
+      overlay: 'ids',
+    },
+  },
+  dryRun: {
+    tool: TOOL_NAMES.draw,
+    note: 'Render a batch without committing it: dryRun shows the hypothetical board in the open 画板 panel, returns '
+      + 'the preview PNG plus checks, and leaves the store, undo history and revision untouched. Drop dryRun to '
+      + 'commit the same batch.',
+    accepted: true,
+    args: {
+      dryRun: true,
+      ops: [
+        {
+          op: 'add',
+          kind: 'rect',
+          id: 'probe',
+          x: 120,
+          y: 150,
+          w: 240,
+          h: 110,
+          radius: 16,
+          fill: 'blue',
+          opacity: 0.14,
+          stroke: 'blue',
+        },
+      ],
+    },
+  },
 }
 
 /** Short, load-bearing rules the manifest repeats to the model. */
@@ -1736,6 +1784,13 @@ export const HINTS: readonly string[] = [
     + 'batch and lists the ids that exist.',
   'Call whiteboard_look after drawing to check the actual pixels — text overflow, overlaps and 3D '
     + 'framing — instead of assuming.',
+  'Contact sheets are 3D-only: debug "per-light" (one tile per shadow-casting light) and angles '
+    + '"turntable" (four yaw views) never apply to the 2D canvas.',
+  'diffAgainst compares documents from the in-memory undo history ("previous", "rev:<n>") or a saved '
+    + 'frame hash; the baseline must be on the same surface as the board, and the history resets when the '
+    + 'Host restarts.',
+  'A dry run (dryRun: true) renders inside the open 画板 panel and never commits: no mutation, no undo '
+    + 'entry, no revision bump; the preview frame is saved, attached and returned with its checks.',
   'Keep a 48-unit margin on the 2D canvas; body text ≥14 keeps the board readable at panel size.',
   'Palette tokens (ink, muted, blue, …) beat hex: the client resolves them per theme, so a light-mode '
     + 'board still reads in dark mode.',

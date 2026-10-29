@@ -71,10 +71,10 @@ Two fixed costs, stated plainly:
 
 | Tool | Purpose |
 |---|---|
-| `whiteboard_draw` | append 2D ops (`add` / `update` / `remove` / `clear`) |
-| `whiteboard_3d` | append 3D object ops plus an optional view (camera, lights, shadows, background, grid, auto-rotate) |
+| `whiteboard_draw` | append 2D ops (`add` / `update` / `remove` / `clear`); `dryRun: true` renders the batch as an uncommitted preview |
+| `whiteboard_3d` | append 3D object ops plus an optional view (camera, lights, shadows, background, grid, auto-rotate); `dryRun: true` previews without committing |
 | `whiteboard_read` | full state: every shape/object with geometry and materials, the camera, lights, viewport and diagnostics |
-| `whiteboard_look` | capture what the open 画板 panel shows as an image plus measurements, warnings and structured checks; `overlay: 'ids'` labels elements, `debug: 'shadow-only'` isolates the shadow pass |
+| `whiteboard_look` | capture what the open 画板 panel shows as an image plus measurements, warnings and structured checks; `overlay: 'ids'` labels elements, `debug: 'shadow-only'` isolates the shadow pass, `debug: 'per-light'` renders one tile per shadow-casting light, `angles: 'turntable'` renders four yaw views, `diffAgainst` compares against an earlier document or frame |
 | `whiteboard_api` | the live contract: tool/field spec, defaults, palette, current camera and lights, viewport, limits, examples; `section` fetches one part |
 | `whiteboard_history` | report the memory-only undo stack: current revision and the steps an undo would restore |
 | `whiteboard_undo` | step the board back one or more mutations; use only when the user asks |
@@ -88,6 +88,27 @@ is world units, y up, ground at `y = 0`. Seven 2D primitives (rect, ellipse, lin
 path, text) and six 3D primitives (box, sphere, cylinder, cone, torus, plane). Colours prefer palette
 tokens that resolve against the theme (`blue`, `amber`, `ink`, `muted`, …), so the board works in light
 and dark.
+
+### Look modes and dry runs
+
+The plain `whiteboard_look` captures what you see. Four explicit requests go further, and all of them
+still render **inside the open 画板 tab** — there is no headless renderer, so a closed panel fails with
+the same readable error as a plain look:
+
+| request | what comes back |
+|---|---|
+| `whiteboard_look({debug: 'per-light'})` | a contact sheet with one tile per shadow-casting light (`#2 directional 1.6`), so a stray or missing shadow is judged one light at a time. 3D only; a rig with no casting light answers with how to arm one (`castShadow: true`). |
+| `whiteboard_look({angles: 'turntable'})` | four yaw views (`0°`, `90°`, `180°`, `270°`) around the current camera target as one sheet, for judging a model from more than one side. 3D only. |
+| `whiteboard_look({diffAgainst: 'previous'})` | a before / after / changed sheet. `previous` and `rev:<n>` re-render a document from the in-memory undo history with the current camera; a 6–16 character frame hash compares that stored PNG instead. The result carries `diff`: changed pixels, changed ratio, pixel bounds when anything changed, and a one-line note. A diff compares one surface only; an empty earlier board counts as the current surface. |
+| `whiteboard_draw` / `whiteboard_3d` with `dryRun: true` | the batch as an uncommitted document: no store mutation, no undo entry, no revision bump. The preview is rendered in the panel and returned with `checks` and `warnings`; a committed batch keeps its normal behaviour. |
+
+The extra views never disturb the live stage: the panel renders them offscreen (a hidden 3D preview
+stage, a static 2D painter) and the camera, scroll position and visible frame stay exactly as they were.
+
+Frames stay content-addressed under `<dsh home>/storages/whiteboard/frames/<session>/<hash>.png`, and
+each session also gets an `index.json` (newest first, the last 64) recording `source` — `look`, `auto`,
+`preview` or `diff` — plus the size, mode, revision and camera. That index is what resolves the
+`diffAgainst: '<hash>'` prefix.
 
 ## Install
 
@@ -114,6 +135,8 @@ Isolated development and verification (does not touch your desktop profile):
 node scripts/dev.mjs setup     # create an isolated DSH_HOME (.wbdev) and link this repository
 node scripts/dev.mjs start     # boot a separate Host (57090 by default, no browser window)
 node scripts/e2e.mjs           # Playwright smoke: draw from the main composer → tab shows it → undo/export/clear
+node scripts/e2e.mjs --phase deep    # contact sheets + diff, with the real model
+node scripts/e2e.mjs --phase dryrun  # a dry-run preview followed by the committed draw
 node scripts/dev.mjs stop
 ```
 

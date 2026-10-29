@@ -61,10 +61,10 @@ three.js，并在回答还在进行时一笔一笔地出现。
 
 | 工具 | 作用 |
 |---|---|
-| `whiteboard_draw` | 向 2D 画布追加一批操作：`add` / `update` / `remove` / `clear` |
-| `whiteboard_3d` | 向 3D 场景追加一批对象操作，以及可选的视图（相机、灯光、阴影、背景、网格、自动旋转） |
+| `whiteboard_draw` | 向 2D 画布追加一批操作：`add` / `update` / `remove` / `clear`；`dryRun: true` 只渲染未提交的预览 |
+| `whiteboard_3d` | 向 3D 场景追加一批对象操作，以及可选的视图（相机、灯光、阴影、背景、网格、自动旋转）；`dryRun: true` 预览但不提交 |
 | `whiteboard_read` | 读出完整状态：每个形状/物体的几何与材质、相机、灯光、视口和诊断 |
-| `whiteboard_look` | 把打开的画板面板截成图片，并返回测量、警告和结构化检查；`overlay: 'ids'` 标出元素 id，`debug: 'shadow-only'` 只看阴影通道 |
+| `whiteboard_look` | 把打开的画板面板截成图片，并返回测量、警告和结构化检查；`overlay: 'ids'` 标出元素 id，`debug: 'shadow-only'` 只看阴影通道，`debug: 'per-light'` 每个投阴影灯光一张分格，`angles: 'turntable'` 四个转角视图，`diffAgainst` 与更早的文档或帧对比 |
 | `whiteboard_api` | 实时契约：工具/字段说明、默认值、调色板、当前相机与灯光、视口、限制、示例；`section` 只取其中一块 |
 | `whiteboard_history` | 读出内存中的撤销栈：当前 revision 以及一次撤销会恢复到的步骤 |
 | `whiteboard_undo` | 把画板后退一或多步；只在用户要求时使用 |
@@ -76,6 +76,25 @@ three.js，并在回答还在进行时一笔一笔地出现。
 `y=0`。支持 7 种 2D 图元（矩形、椭圆、线、箭头、折线、SVG path、文本）和 6 种 3D 图元（立方体、球、圆柱、
 圆锥、圆环、平面），颜色优先使用会随主题解析的调色板 token（`blue`、`amber`、`ink`、`muted` …），因此
 浅色/深色主题下都成立。
+
+### 取帧模式与试画（dry run）
+
+普通 `whiteboard_look` 就是“你看到什么”。另外四种显式请求会多给一些视角，但它们**仍然只在打开的画板
+标签里渲染**——没有无头渲染器，所以面板关着时和普通取帧一样报可读的错误：
+
+| 请求 | 返回什么 |
+|---|---|
+| `whiteboard_look({debug: 'per-light'})` | 每个投阴影灯光一张分格（`#2 directional 1.6`）的拼图，可以逐个灯光判断阴影多了还是少了。仅 3D；没有任何投阴影灯光时会告诉你怎样开一盏（`castShadow: true`）。 |
+| `whiteboard_look({angles: 'turntable'})` | 绕当前相机目标四个转角（`0°`、`90°`、`180°`、`270°`）拼成一张图，用来从多个方向看模型。仅 3D。 |
+| `whiteboard_look({diffAgainst: 'previous'})` | before / after / changed 三联图。`previous` 和 `rev:<n>` 用当前相机重新渲染内存撤销历史里的文档；6–16 位帧 hash 则与存下来的 PNG 对比。结果带 `diff`：变化像素数、变化比例、变化时的包围盒，以及一句说明。只能对比同一面；更早的文档如果整块板都是空的，就按当前面处理。 |
+| `whiteboard_draw` / `whiteboard_3d` 加 `dryRun: true` | 把这批操作当成未提交的文档：不写 store、不产生撤销记录、不涨 revision。预览在面板里渲染，并返回 `checks` 与 `warnings`；正常提交的批次行为不变。 |
+
+这些额外视角不会打扰正在看的画面：面板在离屏渲染（隐藏的 3D 预览舞台、静态 2D 画笔），相机、滚动位置
+和当前画面都保持原样。
+
+帧依旧按内容寻址存在 `<dsh home>/storages/whiteboard/frames/<session>/<hash>.png`，每个会话另有
+`index.json`（最新在前，最多 64 条）记录 `source`（`look` / `auto` / `preview` / `diff`）以及尺寸、模式、
+revision 和相机。`diffAgainst: '<hash>'` 的前缀查找就来自这份索引。
 
 ## 安装
 
@@ -102,6 +121,8 @@ pnpm run check        # 类型检查 + 构建 lib/ + 生成类型 + 校验产物
 node scripts/dev.mjs setup     # 建一个隔离的 DSH_HOME（.wbdev）并把本仓库 link 进去
 node scripts/dev.mjs start     # 起一个独立的 Host（默认 57090，不打开浏览器）
 node scripts/e2e.mjs           # Playwright 冒烟：主输入框画图 → 标签显示 → 撤销/导出/清空
+node scripts/e2e.mjs --phase deep    # 拼图取帧与 diff（需要真实模型）
+node scripts/e2e.mjs --phase dryrun  # 先 dryRun 预览、再正式落笔
 node scripts/dev.mjs stop
 ```
 

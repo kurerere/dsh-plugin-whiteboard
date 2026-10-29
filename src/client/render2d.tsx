@@ -13,11 +13,18 @@
  * `dash`, `shadow`) and the model's palette tokens are implemented here. New
  * shape ids fade and grow in over {@link APPEAR_MS} so a tool call that adds
  * five shapes reads as one deliberate gesture rather than a jump cut.
+ *
+ * {@link renderBoardFrame} is the same painter without a stage and without the
+ * animation: it draws the whole document into an offscreen canvas, which is what
+ * a dry-run preview and a `diffAgainst` baseline need.
  */
 
 import { useLayoutEffect, useRef, type ReactNode } from 'react'
 import { BOARD_EXTENT, type Canvas2D, type Paint, type Shape2D } from '../scene.ts'
+import type { CaptureOptions } from '../shared.ts'
 import { type Bounds, shapeBounds } from './board.ts'
+import { captureWidthLimit, encodePng, type CaptureFrame } from './capture.ts'
+import { overlayShapeIds } from './overlay.ts'
 import {
   fontStack, gridPaint, resolvePaint, shadowPaint, subscribeTheme, surfacePaint, TEXT_WEIGHT,
 } from './palette.ts'
@@ -31,6 +38,23 @@ const GRID_DOT = 1.15
 
 /** Default outline of a shape whose style names none. */
 const DEFAULT_STROKE_WIDTH = 3
+
+/** Default edge of a static frame (preview / diff baseline), in pixels. */
+const STATIC_EDGE = 1024
+
+/** Most a diff baseline is rendered past the frame size it will be scaled to. */
+const BASELINE_SCALE_LIMIT = 3
+
+/**
+ * Output pixels per CSS pixel used to size id labels on a static frame.
+ *
+ * A static render has no measured stage, so labels are sized as they are on a 2×
+ * display, which is what a modern panel reports through `devicePixelRatio`. At
+ * equal output size that matches the label scale of a live capture, so a diff
+ * baseline's plates line up with the current frame's instead of lighting up as
+ * changed pixels.
+ */
+const STATIC_LABEL_UNIT = 2
 
 /** Props of the 2D surface. */
 export interface Board2DProps {
@@ -431,16 +455,37 @@ function clock(): number {
 
 /** Paint one frame into the backing store. */
 function paint(context: CanvasRenderingContext2D, pixel: number, frame: Frame): void {
+  paintInto(context, pixel, pixel, frame)
+}
+
+/**
+ * Paint the document into a `width × height` rectangle, centered.
+ *
+ * The document is a fixed square ({@link BOARD_EXTENT} logical units). A square
+ * output is the normal case and paints edge to edge with no padding; a
+ * non-square output (an exact-size baseline for a frame of another shape, a
+ * letterboxed preview) gets the surface everywhere and the square in the middle,
+ * so the drawing is never stretched. Nothing here is duplicated per caller: the
+ * live `<canvas>` and the static preview frame run this one function.
+ * @param context - destination context.
+ * @param width - destination width in output pixels.
+ * @param height - destination height in output pixels.
+ * @param frame - document, appear state and clock.
+ */
+function paintInto(context: CanvasRenderingContext2D, width: number, height: number, frame: Frame): void {
+  const edge = Math.min(width, height)
+  const offsetX = (width - edge) / 2
+  const offsetY = (height - edge) / 2
   context.setTransform(1, 0, 0, 1, 0, 0)
-  context.clearRect(0, 0, pixel, pixel)
+  context.clearRect(0, 0, width, height)
   // The canvas *is* the document, so it paints its own surface when the model
   // did not choose one: the PNG export of this canvas then has a real background
   // (a transparent export looks broken in any viewer).
   const background = frame.canvas.background
   context.fillStyle = background === null || background === undefined ? surfacePaint() : resolvePaint(background)
-  context.fillRect(0, 0, pixel, pixel)
-  const scale = pixel / BOARD_EXTENT
-  context.setTransform(scale, 0, 0, scale, 0, 0)
+  context.fillRect(0, 0, width, height)
+  const scale = edge / BOARD_EXTENT
+  context.setTransform(scale, 0, 0, scale, offsetX, offsetY)
   if (frame.canvas.grid !== false) {
     const geometry = gridGeometry()
     if (geometry !== undefined) {
@@ -451,6 +496,87 @@ function paint(context: CanvasRenderingContext2D, pixel: number, frame: Frame): 
   const shapes: readonly Shape2D[] = frame.canvas.shapes
   for (const shape of shapes) drawShape(context, shape, frame.appear.get(shape.id), frame.now)
   context.setTransform(1, 0, 0, 1, 0, 0)
+}
+
+/**
+ * Rasterization size of a static 2D frame that has to be compared with a live one.
+ *
+ * A live 2D capture copies the canvas at its **backing-store** size and only then
+ * downscales it to `maxWidth`; a baseline painted straight at the output size is
+ * sharper than that, so the antialiased edges of every shape would differ by more
+ * than the diff's noise threshold and a board that did not change would report
+ * changed pixels. Painting the baseline at the same backing size and letting the
+ * comparison downscale it puts both pictures through one resampling step.
+ *
+ * The scale is capped at {@link BASELINE_SCALE_LIMIT}× the requested size: a very
+ * large panel (a 4K fullscreen tab) would otherwise ask the panel to paint,
+ * encode and decode a multi-megapixel baseline for a diff of a picture that is
+ * going to be at most a few hundred pixels wide on the sheet.
+ * @param size - exact output size the caller wants, or undefined for the default.
+ * @param backing - the live canvas's backing-store size, when it is measurable.
+ * @returns the size to paint at (never smaller than `size`), or undefined when
+ *   the caller asked for the default frame.
+ */
+export function boardBaselineSize(
+  size: { width: number; height: number } | undefined,
+  backing: { width: number; height: number } | undefined,
+): { width: number; height: number } | undefined {
+  if (size === undefined) return undefined
+  const width = Math.max(1, Math.round(size.width))
+  const height = Math.max(1, Math.round(size.height))
+  const edge = Math.min(width, height)
+  const source = backing === undefined ? 0 : Math.min(backing.width, backing.height)
+  if (source <= edge) return { width, height }
+  const scale = Math.min(source / edge, BASELINE_SCALE_LIMIT)
+  return { width: Math.round(width * scale), height: Math.round(height * scale) }
+}
+
+/**
+ * Render the whole 2D document once, offscreen, with no appear animation.
+ *
+ * This is the 2D half of previews and diff baselines. A preview of an
+ * uncommitted (dry-run) document must look exactly like the board would after
+ * the commit, so nothing animates and the frame starts from the document alone
+ * — the live canvas is never read, copied, resized or redrawn.
+ *
+ * The default output is a square of `options.maxWidth` (1024) pixels; callers
+ * that need to line up with an existing frame (a `diffAgainst` baseline) pass
+ * its exact `size` instead, and — when the live stage can be measured — the live
+ * label `unit`, so the id plates land the same size a live capture would have
+ * drawn them and the diff does not read them as content changes.
+ * @param canvas - the 2D document to render.
+ * @param options - requested overlay and longest side.
+ * @param size - exact output size, in pixels; omitted means a square `maxWidth`.
+ * @param unit - output pixels per CSS pixel for id labels; defaults to a 2× display.
+ * @returns the frame, with `mode: '2d'` and no camera, viewport or tile captions
+ *   (a 2D document is one picture; contact sheets are a 3D mode).
+ */
+export function renderBoardFrame(
+  canvas: Canvas2D,
+  options: CaptureOptions,
+  size?: { width: number; height: number },
+  unit?: number,
+): CaptureFrame {
+  const width = size === undefined ? captureWidthLimit(options.maxWidth, STATIC_EDGE) : Math.max(1, Math.round(size.width))
+  const height = size === undefined ? width : Math.max(1, Math.round(size.height))
+  const output = document.createElement('canvas')
+  output.width = width
+  output.height = height
+  const context = output.getContext('2d')
+  if (context === null) throw new Error('cannot create a 2D context for the frame')
+  paintInto(context, output.width, output.height, { canvas, appear: new Map<string, Appear>(), now: clock() })
+  if (options.overlay === 'ids') {
+    // The labels share the document's own scale, which is the square the
+    // painting above centered; translate to it so a letterboxed frame still
+    // lands every plate on its shape.
+    const edge = Math.min(output.width, output.height)
+    const labelUnit = unit !== undefined && Number.isFinite(unit) && unit > 0 ? unit : STATIC_LABEL_UNIT
+    context.save()
+    context.translate((output.width - edge) / 2, (output.height - edge) / 2)
+    overlayShapeIds(context, canvas.shapes, edge, labelUnit)
+    context.restore()
+  }
+  return { png: encodePng(output), width: output.width, height: output.height, mode: '2d' }
 }
 
 function paintSize(size: number): number {

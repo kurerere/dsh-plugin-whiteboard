@@ -322,6 +322,29 @@ export interface Scene3DEvent {
 /** Which surface the board is currently about. */
 export type BoardMode = '2d' | '3d'
 
+/**
+ * Whether one scene light casts a shadow.
+ *
+ * An explicit `castShadow` wins; omitted means "only the first directional
+ * light casts", so the default rig renders one readable shadow instead of one
+ * per light. Both the Host checks and the 3D engine (per-light capture) use this
+ * one rule, so the tool and the pixels cannot disagree.
+ * @param lights - the whole light rig, in document order.
+ * @param index - index of the light to test.
+ * @returns true when that light casts a shadow.
+ */
+export function lightCastsShadow(lights: readonly Light3D[], index: number): boolean {
+  const light = lights[index]
+  if (light === undefined) return false
+  if (typeof light.castShadow === 'boolean') return light.castShadow
+  return light.kind === 'directional' && index === lights.findIndex(candidate => candidate.kind === 'directional')
+}
+
+/** Indices of every light that casts a shadow, in document order. */
+export function shadowCasters(lights: readonly Light3D[]): number[] {
+  return lights.map((_light, index) => index).filter(index => lightCastsShadow(lights, index))
+}
+
 /** Whole 2D surface. */
 export interface Canvas2D {
   background: Paint | null

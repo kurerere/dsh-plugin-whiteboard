@@ -11,20 +11,36 @@
  *
  * The broker owns only correlation and timeouts; the panel owns pixels. A frame
  * is submitted as base64 PNG, persisted under
- * `<dsh home>/storages/whiteboard/frames/<session>/<hash>.png`, and — when the
+ * `<dsh home>/storages/whiteboard/frames/<session>/<hash>.png` (see
+ * `./frames.ts`, which also re-exports its old names from here), and — when the
  * deployment mounts a durable attachment store — normalized into an image
  * attachment the model can see inline. The path remains the fallback: a model
  * with `read_image` can read the exact same file.
+ *
+ * A deep look travels as the same single frame exchange: `request` carries an
+ * optional earlier document/frame (`baseline`) or an uncommitted dry-run
+ * document (`preview`), and the panel's answer may describe a contact sheet
+ * (`tiles`) or a before/after comparison (`diff`). Those extra fields are
+ * optional exactly as far as the wire is concerned — a frame with a diff sheet
+ * is still just a PNG — so `submit` copies the ones it can trust and drops the
+ * ones it cannot instead of rejecting the pixels.
  */
-import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, rename, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ImageBlock } from '@deepseek-ai/dsh-llm'
-import { boardStorageDirectory, type BoardStore } from './board-store.ts'
+import type { BoardStore } from './board-store.ts'
+import type { SavedFrame } from './frames.ts'
+import type { BoardState } from './scene.ts'
 import {
-  type CaptureAnswer, type CaptureOptions, type CaptureRequest, type CaptureViewport,
+  type CaptureAnswer, type CaptureBaseline, type CaptureDiff,
+  type CaptureOptions, type CaptureRequest, type CaptureViewport,
 } from './shared.ts'
+
+// The frame store moved to `./frames.ts` (it grew an index, a listing and
+// pruning); the old names stay importable from here so call sites and the
+// published types keep working.
+export { createFrameStore } from './frames.ts'
+export type { FrameLogger, FrameMeta, FrameRecord, FrameSource, FrameStore, SavedFrame } from './frames.ts'
 
 /** Error thrown when no panel is polling for the board (or the request expired). */
 export class CaptureUnavailableError extends Error {
@@ -60,6 +76,28 @@ const VIEWER_WINDOW_MS = 3_000
 const MIN_FRAME_WIDTH = 64
 const MAX_FRAME_WIDTH = 2_048
 
+/** Most tile captions any contact sheet produces (a 3-column diff is the widest). */
+const MAX_TILES = 8
+
+/** Longest tile caption, diff label and diff note kept from the panel. */
+const MAX_TILE_LABEL = 120
+const MAX_DIFF_LABEL = 200
+const MAX_DIFF_NOTE = 600
+
+/**
+ * Extra inputs one capture may carry beside the options.
+ *
+ * Both are optional and independent: `baseline` asks for a before/after sheet,
+ * `preview` asks for an uncommitted dry-run document to be rendered instead of
+ * the live surface.
+ */
+export interface CaptureRequestExtra {
+  /** Earlier document or stored frame to compare the new frame with. */
+  baseline?: CaptureBaseline
+  /** Uncommitted document to render (never written to the board). */
+  preview?: BoardState
+}
+
 /**
  * The Host's capture broker.
  *
@@ -73,10 +111,16 @@ export interface CaptureService {
    * @param sessionId - board key (the main Session id).
    * @param options - what to capture.
    * @param timeoutMs - how long to wait for the panel.
+   * @param extra - optional diff baseline and/or dry-run document.
    * @returns the panel's answer (PNG base64 + metadata).
    * @throws {@link CaptureUnavailableError} when no panel answers in time.
    */
-  request(sessionId: string, options: CaptureOptions, timeoutMs?: number): Promise<CaptureAnswer>
+  request(
+    sessionId: string,
+    options: CaptureOptions,
+    timeoutMs?: number,
+    extra?: CaptureRequestExtra,
+  ): Promise<CaptureAnswer>
   /**
    * Hand the next waiting request to a polling panel.
    * @param sessionId - board key.
@@ -127,12 +171,97 @@ export interface CaptureService {
   dispose(): void
 }
 
+/**
+ * Read the optional changed-pixel box a diff sheet reports.
+ *
+ * The box is in the **new frame's** output pixels; a malformed one is dropped
+ * on its own, because the rest of the diff summary is still true without it.
+ * @param value - untrusted `diff.bounds`.
+ * @returns a copied box, or undefined.
+ */
+function sanitizeDiffBounds(value: unknown): CaptureDiff['bounds'] | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const x = record['x']
+  const y = record['y']
+  const width = record['width']
+  const height = record['height']
+  if (typeof x !== 'number' || !Number.isFinite(x) || x < 0) return undefined
+  if (typeof y !== 'number' || !Number.isFinite(y) || y < 0) return undefined
+  if (typeof width !== 'number' || !Number.isFinite(width) || width < 0) return undefined
+  if (typeof height !== 'number' || !Number.isFinite(height) || height < 0) return undefined
+  return { x, y, width, height }
+}
+
+/**
+ * Validate and copy an optional diff summary from the panel.
+ *
+ * The summary is explanatory metadata for the model: a malformed one is dropped
+ * (with its bounds) rather than failing the frame, which is still a perfectly
+ * good PNG.
+ * @param value - untrusted `CaptureAnswer.diff`.
+ * @returns a fresh, copied summary, or undefined when it is not usable.
+ */
+export function sanitizeCaptureDiff(value: unknown): CaptureDiff | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const kind = record['kind']
+  const label = record['label']
+  const rev = record['rev']
+  const changedPixels = record['changedPixels']
+  const changedRatio = record['changedRatio']
+  const comparable = record['comparable']
+  const note = record['note']
+  if (kind !== 'document' && kind !== 'image') return undefined
+  if (typeof label !== 'string' || label.length > MAX_DIFF_LABEL) return undefined
+  if (typeof rev !== 'number' || !Number.isFinite(rev) || !Number.isInteger(rev) || rev < 0) return undefined
+  if (typeof changedPixels !== 'number' || !Number.isFinite(changedPixels) || changedPixels < 0) return undefined
+  if (typeof changedRatio !== 'number' || !Number.isFinite(changedRatio)
+    || changedRatio < 0 || changedRatio > 1) return undefined
+  if (typeof comparable !== 'boolean') return undefined
+  if (typeof note !== 'string' || note.length > MAX_DIFF_NOTE) return undefined
+  const bounds = sanitizeDiffBounds(record['bounds'])
+  return {
+    kind,
+    label,
+    rev,
+    changedPixels,
+    changedRatio,
+    comparable,
+    note,
+    ...(bounds === undefined ? {} : { bounds }),
+  }
+}
+
+/**
+ * Validate and copy the optional contact-sheet captions from the panel.
+ *
+ * Captions are decoration, not data: entries that are not strings are dropped
+ * one by one (a stray `null` must not cost the other captions) and the list is
+ * cut to the documented maximum, because no sheet is wider than that.
+ * @param value - untrusted `CaptureAnswer.tiles`.
+ * @returns a copied caption list, or undefined when none survived.
+ */
+export function sanitizeCaptureTiles(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const tiles: string[] = []
+  for (const tile of value) {
+    if (typeof tile !== 'string' || tile.length > MAX_TILE_LABEL) continue
+    tiles.push(tile)
+    if (tiles.length >= MAX_TILES) break
+  }
+  return tiles.length === 0 ? undefined : tiles
+}
+
 /** Normalise untrusted tool options into the wire options. */
 function sanitizeOptions(options: CaptureOptions): CaptureOptions {
   const out: CaptureOptions = {}
   if (options.mode === 'auto' || options.mode === '2d' || options.mode === '3d') out.mode = options.mode
   if (options.overlay === 'ids' || options.overlay === 'none') out.overlay = options.overlay
-  if (options.debug === 'lit' || options.debug === 'shadow-only') out.debug = options.debug
+  if (options.debug === 'lit' || options.debug === 'shadow-only' || options.debug === 'per-light') {
+    out.debug = options.debug
+  }
+  if (options.angles === 'default' || options.angles === 'turntable') out.angles = options.angles
   if (typeof options.maxWidth === 'number' && Number.isFinite(options.maxWidth)) {
     out.maxWidth = Math.min(MAX_FRAME_WIDTH, Math.max(MIN_FRAME_WIDTH, Math.round(options.maxWidth)))
   }
@@ -180,7 +309,12 @@ export function createCaptureService(store: BoardStore): CaptureService {
     entry.reject(error)
   }
 
-  const request = (sessionId: string, options: CaptureOptions, timeoutMs = 4_000): Promise<CaptureAnswer> => {
+  const request = (
+    sessionId: string,
+    options: CaptureOptions,
+    timeoutMs = 4_000,
+    extra?: CaptureRequestExtra,
+  ): Promise<CaptureAnswer> => {
     if (disposed) {
       return Promise.reject(new CaptureUnavailableError('the whiteboard host is shutting down; no frame can be captured'))
     }
@@ -192,6 +326,10 @@ export function createCaptureService(store: BoardStore): CaptureService {
       rev: snapshot.rev,
       mode: snapshot.board.mode,
       options: sanitizeOptions(options),
+      // The panel decides how the extra document/frame is rendered; the broker
+      // only carries it, unchanged, to the one panel that can draw it.
+      ...(extra?.baseline === undefined ? {} : { baseline: extra.baseline }),
+      ...(extra?.preview === undefined ? {} : { preview: extra.preview }),
     }
     return new Promise<CaptureAnswer>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -244,7 +382,25 @@ export function createCaptureService(store: BoardStore): CaptureService {
       settle(answer.requestId, undefined, new Error(error))
       return { accepted: false, error }
     }
-    settle(answer.requestId, answer)
+    // Optional answer fields are copies of what the panel said, never the
+    // panel's own object: a malformed diff/tile list is dropped here, while the
+    // frame itself (which is just a PNG) is still delivered.
+    const diff = sanitizeCaptureDiff(answer.diff)
+    const tiles = sanitizeCaptureTiles(answer.tiles)
+    const preview = answer.preview === true
+    const accepted: CaptureAnswer = {
+      requestId: answer.requestId,
+      png: answer.png,
+      width: answer.width,
+      height: answer.height,
+      mode: answer.mode,
+      ...(answer.camera === undefined ? {} : { camera: answer.camera }),
+      ...(answer.viewport === undefined ? {} : { viewport: answer.viewport }),
+      ...(diff === undefined ? {} : { diff }),
+      ...(tiles === undefined ? {} : { tiles }),
+      ...(preview ? { preview } : {}),
+    }
+    settle(answer.requestId, accepted)
     return { accepted: true }
   }
 
@@ -277,62 +433,6 @@ export function createCaptureService(store: BoardStore): CaptureService {
       viewports.clear()
       themes.clear()
       appTheme = undefined
-    },
-  }
-}
-
-/** One persisted frame. */
-export interface SavedFrame {
-  /** Absolute PNG path the model can open with `read_image`. */
-  path: string
-  /** Short content hash, stable for identical pixels. */
-  hash: string
-  /** Byte length of the PNG. */
-  bytes: number
-  /** The decoded bytes, so the attachment path does not read the file again. */
-  data: Buffer
-}
-
-/** Durable PNG storage for captured frames. */
-export interface FrameStore {
-  /**
-   * Persist one base64 PNG.
-   * @param sessionId - board key.
-   * @param png - base64 PNG, with or without a data-URL prefix.
-   * @returns the saved frame.
-   */
-  save(sessionId: string, png: string): Promise<SavedFrame>
-}
-
-/** PNG signature; a frame that is not a PNG is a panel bug, not art. */
-const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
-
-/** Keep a session id usable as one directory name. */
-function safeSegment(value: string): string {
-  return value.replace(/[^A-Za-z0-9._:-]/g, '_')
-}
-
-/**
- * Create the frame store under the current dsh home.
- * @returns the store; directories are created on the first save.
- */
-export function createFrameStore(): FrameStore {
-  const root = join(boardStorageDirectory(), 'frames')
-  return {
-    async save(sessionId: string, png: string): Promise<SavedFrame> {
-      const raw = png.startsWith('data:') ? png.slice(png.indexOf(',') + 1) : png
-      const data = Buffer.from(raw, 'base64')
-      if (data.length < PNG_SIGNATURE.length || !data.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
-        throw new Error('the panel returned a frame that is not a PNG')
-      }
-      const hash = createHash('sha256').update(data).digest('hex').slice(0, 16)
-      const directory = join(root, safeSegment(sessionId))
-      await mkdir(directory, { recursive: true, mode: 0o700 })
-      const path = join(directory, `${hash}.png`)
-      const temporary = `${path}.${randomUUID()}.tmp`
-      await writeFile(temporary, data, { mode: 0o600 })
-      await rename(temporary, path)
-      return { path, hash, bytes: data.length, data }
     },
   }
 }

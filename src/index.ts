@@ -26,7 +26,9 @@ import type {} from '@deepseek-ai/dsh-session-query'
 import type {} from '@deepseek-ai/dsh-tools'
 import { registerBoardFace } from './agent.ts'
 import { createBoardStore, type ClearMode } from './board-store.ts'
-import { createCaptureService, createFrameStore, createImageAttacher } from './capture.ts'
+import {
+  createCaptureService, createFrameStore, createImageAttacher, sanitizeCaptureDiff, sanitizeCaptureTiles,
+} from './capture.ts'
 import { migrateLegacyBoards } from './migrate.ts'
 import {
   CAPTURE_POLL_PATH, CAPTURE_SUBMIT_PATH, CLEAR_PATH, isLegacyWhiteboardId, SAY_PATH, STATE_PATH, THEME_PATH, UNDO_PATH,
@@ -144,7 +146,7 @@ export function apply(ctx: Context): void {
   const captures = createCaptureService(store)
   const services: BoardToolServices = {
     captures,
-    frames: createFrameStore(),
+    frames: createFrameStore(ctx.logger),
     attachImage: createImageAttacher(ctx),
   }
 
@@ -255,6 +257,13 @@ export function apply(ctx: Context): void {
       if (mode !== '2d' && mode !== '3d') return fail(400, 'mode must be "2d" or "3d"')
       const camera = body['camera'] === undefined ? undefined : asCamera(body['camera'])
       const viewport = body['viewport'] === undefined ? undefined : asViewport(body['viewport'])
+      // Deep-look extras travel with the same frame: a diff summary, contact-sheet
+      // captions and the dry-run flag. They are parsed with the camera's
+      // discipline — shape-checked, copied, and dropped when malformed — because
+      // the frame itself is still a usable PNG without them.
+      const diff = body['diff'] === undefined ? undefined : sanitizeCaptureDiff(body['diff'])
+      const tiles = body['tiles'] === undefined ? undefined : sanitizeCaptureTiles(body['tiles'])
+      const preview = body['preview'] === true ? true : undefined
       const answer: CaptureAnswer = {
         requestId,
         png,
@@ -263,6 +272,9 @@ export function apply(ctx: Context): void {
         mode,
         ...(camera === undefined ? {} : { camera }),
         ...(viewport === undefined ? {} : { viewport }),
+        ...(diff === undefined ? {} : { diff }),
+        ...(tiles === undefined ? {} : { tiles }),
+        ...(preview === undefined ? {} : { preview }),
         ...(typeof failureText === 'string' && failureText !== '' ? { error: failureText } : {}),
       }
       try {

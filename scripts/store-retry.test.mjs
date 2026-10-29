@@ -11,6 +11,11 @@
 // deterministically if the retry is removed. Windows only: the equivalent POSIX
 // failure needs a read-only directory rather than an open handle, and the plugin
 // ships for dsh's Web/Desktop client on Windows.
+//
+// The last two cases cover the memory-only history accessors the deep-look slice
+// added (`previous`, `revision`): `diffAgainst: 'previous' | 'rev:<n>'` re-renders
+// exactly what they return, so they are tested against the real store rather than
+// a stub. They run on every platform.
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
@@ -144,4 +149,65 @@ test('the board document survives a save/undo round trip', { skip }, async () =>
   assert.deepEqual(stored.board.canvas.shapes, undone.snapshot.board.canvas.shapes)
   assert.equal(emptyBoard().mode, stored.board.mode)
   store.dispose()
+})
+
+/** A board key the history cases own, so the retry cases cannot cross-talk. */
+const HISTORY_BOARD = 'session-history-probe'
+
+test('previous() returns the document before the latest mutation', async () => {
+  const store = createBoardStore(ctx)
+  try {
+    await store.mutate(HISTORY_BOARD, draw('first'))
+    const second = await store.mutate(HISTORY_BOARD, draw('second'))
+    const previous = store.previous(HISTORY_BOARD)
+    assert.ok(previous !== undefined, 'a mutation must leave exactly one previous document')
+    assert.equal(previous.rev, second.rev - 1, 'previous is the revision before the latest one')
+    assert.equal(previous.board.rev, previous.rev, 'the snapshot and its board agree on the revision')
+    const ids = previous.board.canvas.shapes.map(shape => shape.id)
+    assert.ok(ids.includes('text-first'), 'previous still has the first batch')
+    assert.equal(ids.includes('text-second'), false, 'previous is before the latest batch')
+  } finally {
+    store.dispose()
+  }
+})
+
+test('revision() finds a retained document by its own board.rev, and nothing else', async () => {
+  const store = createBoardStore(ctx)
+  try {
+    assert.equal(store.revision(HISTORY_BOARD, 0), undefined, 'a fresh store has no retained revision')
+    await store.mutate(HISTORY_BOARD, draw('alpha'))
+    const second = await store.mutate(HISTORY_BOARD, draw('beta'))
+    const retained = store.revision(HISTORY_BOARD, second.rev - 1)
+    assert.ok(retained !== undefined, 'the pre-mutation revision is retained')
+    assert.equal(retained.board.rev, second.rev - 1)
+    assert.equal(retained.board.canvas.shapes.some(shape => shape.id === 'text-beta'), false)
+    assert.equal(store.revision(HISTORY_BOARD, 9_999), undefined, 'an unknown revision is undefined')
+  } finally {
+    store.dispose()
+  }
+})
+
+test('the history is memory-only and resets when the board is replaced', async () => {
+  const store = createBoardStore(ctx)
+  try {
+    await store.mutate(HISTORY_BOARD, draw('kept'))
+    assert.ok(store.previous(HISTORY_BOARD) !== undefined)
+    // `newBoard` keeps the durable document but drops steps: a replaced board is
+    // not the same board.
+    const replaced = await store.newBoard(HISTORY_BOARD)
+    assert.ok(replaced.rev > 0, 'the durable board is still there')
+    assert.equal(store.previous(HISTORY_BOARD), undefined, 'a replaced board keeps no pre-mutation document')
+  } finally {
+    store.dispose()
+  }
+  // A new store instance is what a Host restart looks like: the document loads,
+  // the memory-only history does not.
+  const restarted = createBoardStore(ctx)
+  try {
+    assert.ok(restarted.read(HISTORY_BOARD).rev > 0, 'the durable board survived the restart')
+    assert.equal(restarted.previous(HISTORY_BOARD), undefined, 'history does not survive a Host restart')
+    assert.equal(restarted.revision(HISTORY_BOARD, 1), undefined)
+  } finally {
+    restarted.dispose()
+  }
 })

@@ -26,14 +26,14 @@ import {
 import type { InjectFace, PropsLocale, PropsRuntime, TranslateNS } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-session/client'
 import type {} from '@deepseek-ai/dsh-client-ui-sidebar-right/client'
-import type { CaptureOptions, WhiteboardUndone } from '../shared.ts'
-import type { BoardMode } from '../scene.ts'
+import type { CaptureOptions, CaptureRequest, CaptureViewport, WhiteboardUndone } from '../shared.ts'
+import type { BoardMode, BoardState, Camera3D } from '../scene.ts'
 import { surfaceCount } from './board.ts'
 import { capture2d, useCapture, type CaptureFrame } from './capture.ts'
 import type { DraftFace } from './model.ts'
 import { surfacePaint } from './palette.ts'
 import { useBoard } from './poll.ts'
-import { Board2D } from './render2d.tsx'
+import { Board2D, boardBaselineSize, renderBoardFrame } from './render2d.tsx'
 import { Board3D, type Board3DCapture } from './render3d.tsx'
 import type { NS } from './locales.ts'
 
@@ -117,6 +117,22 @@ function saveCanvas(canvas: HTMLCanvasElement, name: string): void {
   document.body.appendChild(anchor)
   anchor.click()
   anchor.remove()
+}
+
+/**
+ * Whether two board cameras frame the same view.
+ *
+ * A dry-run preview keeps the user's live orbit unless the batch itself moved
+ * the camera; this is the tolerance that separates the two cases.
+ * @param left - first camera.
+ * @param right - second camera.
+ * @returns true when position, target and fov agree within a thousandth.
+ */
+function sameCamera(left: Camera3D, right: Camera3D): boolean {
+  const near = (a: number, b: number): boolean => Math.abs(a - b) <= 0.001
+  return near(left.fov, right.fov)
+    && left.position.every((value, index) => near(value, right.position[index] ?? value))
+    && left.target.every((value, index) => near(value, right.target[index] ?? value))
 }
 
 /** One stage measurement, in CSS pixels. */
@@ -302,16 +318,66 @@ function WhiteboardBoard({ sessionId, running, visible, standalone, clear, undo,
   latestSurface.current = surface
   /** The 3D stage's capture handle; filled by `Board3D` once its engine is up. */
   const capture3d = useRef<Board3DCapture | undefined>(undefined)
+  /**
+   * The hidden 3D stage's capture handle.
+   *
+   * A dry-run preview and a 3D `diffAgainst` baseline need a renderer even while
+   * the 2D surface is the one on screen, and they must not disturb the visible
+   * stage — so the tab keeps one offscreen `Board3D` for that. It exists only
+   * while this tab can actually answer a capture ({@link previewStage}), so a
+   * background or collapsed tab body holds no WebGL context; `Board3D` disposes
+   * the engine with the context when it unmounts, and this ref is cleared with it,
+   * so a request that arrives mid-remount gets the readable "not ready" error
+   * instead of a dead renderer.
+   */
+  const capturePreview3d = useRef<Board3DCapture | undefined>(undefined)
 
   /**
    * Take the frame the model asked for.
    *
-   * A request may name a surface, but a frame can only be taken of what is on
-   * screen — that is the product decision behind this feature — so the displayed
-   * surface wins and the answer reports it. Overlay, debug state and output size
-   * are delegated to whichever renderer owns the pixels.
+   * A plain request may name a surface, but a frame can only be taken of what is
+   * on screen — that is the product decision behind this feature — so the
+   * displayed surface wins and the answer reports it. Overlay, debug state and
+   * output size are delegated to whichever renderer owns the pixels.
+   *
+   * Two explicit requests are the exception, because they are about a document
+   * rather than about the user's view, and both are rendered offscreen:
+   *
+   * - a dry-run preview renders the uncommitted document (2D straight onto an
+   *   offscreen canvas, 3D through the hidden engine) with the current view, so
+   *   the user's stage never jumps to a board that is not committed;
+   * - the answer reports the preview document's own surface, which is what the
+   *   tool tells the model it is looking at.
    */
-  const snapshot = useCallback((options: CaptureOptions): CaptureFrame => {
+  const snapshot = useCallback((options: CaptureOptions, request: CaptureRequest): CaptureFrame => {
+    const preview = request.preview
+    if (preview !== undefined) {
+      if (preview.mode === '3d') {
+        const stage = capturePreview3d.current
+        if (stage === undefined) throw new Error('the 3D preview stage is not ready')
+        // A visible 3D stage is showing the live orbit the user set, and a
+        // preview that only adds objects must not yank them to the document's
+        // framing. A preview that *changes* the camera is different: that change
+        // is part of what is being previewed, so its framing wins.
+        const live = latestBoard.current.scene.camera
+        const camera = sameCamera(preview.scene.camera, live)
+          ? capture3d.current?.view() ?? live
+          : preview.scene.camera
+        const frame = stage.renderDocument(preview.scene, options, camera)
+        // The hidden stage's viewport describes the preview box, not the panel
+        // the user is looking at: report the pixels, the camera and any sheet
+        // captions, and leave the panel viewport to the plain-capture path.
+        return {
+          png: frame.png,
+          width: frame.width,
+          height: frame.height,
+          camera: frame.camera,
+          mode: '3d',
+          ...(frame.tiles === undefined ? {} : { tiles: frame.tiles }),
+        }
+      }
+      return renderBoardFrame(preview.canvas, options)
+    }
     if (latestSurface.current === '3d') {
       const stage = capture3d.current
       if (stage === undefined) throw new Error('the 3D stage is not ready')
@@ -322,9 +388,65 @@ function WhiteboardBoard({ sessionId, running, visible, standalone, clear, undo,
     return capture2d(stage, latestBoard.current, options)
   }, [])
 
+  /**
+   * Re-render an earlier document for a `diffAgainst` look.
+   *
+   * A document baseline must be the same picture the current frame would have
+   * been at that revision: same view, same output size, same overlays.
+   *
+   * - 2D is painted at the live canvas's own backing resolution and scaled down
+   *   by the comparison, which is exactly what happened to the live frame — a
+   *   baseline painted straight at the output size would carry sharper edges and
+   *   read as changed pixels.
+   * - 3D is rendered by the hidden engine at the exact frame size, with the live
+   *   stage's viewport so id plates land on the same pixels as in the frame.
+   */
+  const renderBaseline = useCallback((
+    board: BoardState,
+    options: CaptureOptions,
+    camera?: Camera3D,
+    size?: { width: number; height: number },
+    viewport?: CaptureViewport,
+  ): CaptureFrame => {
+    if (board.mode === '3d') {
+      const stage = capturePreview3d.current
+      if (stage === undefined) throw new Error('the 3D preview stage is not ready')
+      const frame = stage.renderDocument(board.scene, options, camera, size, viewport)
+      return {
+        png: frame.png,
+        width: frame.width,
+        height: frame.height,
+        camera: frame.camera,
+        mode: '3d',
+        ...(frame.tiles === undefined ? {} : { tiles: frame.tiles }),
+      }
+    }
+    const canvas = stageNode.current?.querySelector<HTMLCanvasElement>('canvas.dshwb-canvas')
+    const backing = canvas === null || canvas === undefined ? undefined : { width: canvas.width, height: canvas.height }
+    const target = boardBaselineSize(size, backing)
+    // Labels are sized the way the live capture sized them at *its* output size,
+    // which for this painter means backing pixels per CSS pixel.
+    const unit = canvas !== null && canvas !== undefined && canvas.clientWidth > 0 && target !== undefined
+      ? target.width / canvas.clientWidth
+      : undefined
+    return renderBoardFrame(board.canvas, options, target, unit)
+  }, [])
+
   // Polls only while this tab is on screen and the stage is measurable, so an
   // idle board costs one 204 per tick and never renders a frame nobody sees.
-  useCapture({ sessionId, surface, visible, ready: stageReady, revision: rev, snapshot })
+  useCapture({ sessionId, surface, visible, ready: stageReady, revision: rev, snapshot, renderBaseline })
+
+  /**
+   * Whether the offscreen 3D stage exists.
+   *
+   * Deliberately the same condition the capture loop arms on: a frame can only be
+   * asked for while this tab is on screen and measured, so any other moment would
+   * hold a WebGL context for a body that is not polling (the sidebar keeps tab
+   * bodies mounted for background Sessions and collapsed columns). A visible tab
+   * still has the stage before the first request arrives, because the loop that
+   * receives requests starts with the same two flags.
+   */
+  const previewStage = stageReady && visible !== false
 
   // Follow the surface the model just drew on, unless the user pinned one.
   useEffect(() => {
@@ -565,6 +687,20 @@ function WhiteboardBoard({ sessionId, running, visible, standalone, clear, undo,
           )
           : null}
       </div>
+
+      {/* The offscreen renderer for dry-run previews and 3D diff baselines. It is
+        * the same 3D surface on a fixed, off-screen, inert 960×600 box, so it can
+        * never affect the layout or the visible stage. It exists only while the
+        * tab can answer a capture (see `previewStage`), which keeps background tab
+        * bodies free of a second WebGL context; unmounting disposes the engine and
+        * its context with it. */}
+      {previewStage
+        ? (
+          <div className="dshwb-previewStage" aria-hidden="true">
+            <Board3D scene={board.scene} resetKey={0} captureRef={capturePreview3d} />
+          </div>
+        )
+        : null}
     </div>
   )
 }

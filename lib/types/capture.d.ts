@@ -1,7 +1,11 @@
 import type { Context } from '@deepseek-ai/cordis';
 import type { ImageBlock } from '@deepseek-ai/dsh-llm';
-import { type BoardStore } from './board-store.ts';
-import { type CaptureAnswer, type CaptureOptions, type CaptureRequest, type CaptureViewport } from './shared.ts';
+import type { BoardStore } from './board-store.ts';
+import type { SavedFrame } from './frames.ts';
+import type { BoardState } from './scene.ts';
+import { type CaptureAnswer, type CaptureBaseline, type CaptureDiff, type CaptureOptions, type CaptureRequest, type CaptureViewport } from './shared.ts';
+export { createFrameStore } from './frames.ts';
+export type { FrameLogger, FrameMeta, FrameRecord, FrameSource, FrameStore, SavedFrame } from './frames.ts';
 /** Error thrown when no panel is polling for the board (or the request expired). */
 export declare class CaptureUnavailableError extends Error {
     /** Stable marker for callers that want to fall back to text only. */
@@ -10,6 +14,19 @@ export declare class CaptureUnavailableError extends Error {
      * @param message - model-facing explanation.
      */
     constructor(message: string);
+}
+/**
+ * Extra inputs one capture may carry beside the options.
+ *
+ * Both are optional and independent: `baseline` asks for a before/after sheet,
+ * `preview` asks for an uncommitted dry-run document to be rendered instead of
+ * the live surface.
+ */
+export interface CaptureRequestExtra {
+    /** Earlier document or stored frame to compare the new frame with. */
+    baseline?: CaptureBaseline;
+    /** Uncommitted document to render (never written to the board). */
+    preview?: BoardState;
 }
 /**
  * The Host's capture broker.
@@ -24,10 +41,11 @@ export interface CaptureService {
      * @param sessionId - board key (the main Session id).
      * @param options - what to capture.
      * @param timeoutMs - how long to wait for the panel.
+     * @param extra - optional diff baseline and/or dry-run document.
      * @returns the panel's answer (PNG base64 + metadata).
      * @throws {@link CaptureUnavailableError} when no panel answers in time.
      */
-    request(sessionId: string, options: CaptureOptions, timeoutMs?: number): Promise<CaptureAnswer>;
+    request(sessionId: string, options: CaptureOptions, timeoutMs?: number, extra?: CaptureRequestExtra): Promise<CaptureAnswer>;
     /**
      * Hand the next waiting request to a polling panel.
      * @param sessionId - board key.
@@ -81,37 +99,31 @@ export interface CaptureService {
     dispose(): void;
 }
 /**
+ * Validate and copy an optional diff summary from the panel.
+ *
+ * The summary is explanatory metadata for the model: a malformed one is dropped
+ * (with its bounds) rather than failing the frame, which is still a perfectly
+ * good PNG.
+ * @param value - untrusted `CaptureAnswer.diff`.
+ * @returns a fresh, copied summary, or undefined when it is not usable.
+ */
+export declare function sanitizeCaptureDiff(value: unknown): CaptureDiff | undefined;
+/**
+ * Validate and copy the optional contact-sheet captions from the panel.
+ *
+ * Captions are decoration, not data: entries that are not strings are dropped
+ * one by one (a stray `null` must not cost the other captions) and the list is
+ * cut to the documented maximum, because no sheet is wider than that.
+ * @param value - untrusted `CaptureAnswer.tiles`.
+ * @returns a copied caption list, or undefined when none survived.
+ */
+export declare function sanitizeCaptureTiles(value: unknown): string[] | undefined;
+/**
  * Build the capture broker for one plugin instance.
  * @param store - the board store used to stamp each request with the current revision.
  * @returns the broker; call `dispose()` with the plugin lifetime.
  */
 export declare function createCaptureService(store: BoardStore): CaptureService;
-/** One persisted frame. */
-export interface SavedFrame {
-    /** Absolute PNG path the model can open with `read_image`. */
-    path: string;
-    /** Short content hash, stable for identical pixels. */
-    hash: string;
-    /** Byte length of the PNG. */
-    bytes: number;
-    /** The decoded bytes, so the attachment path does not read the file again. */
-    data: Buffer;
-}
-/** Durable PNG storage for captured frames. */
-export interface FrameStore {
-    /**
-     * Persist one base64 PNG.
-     * @param sessionId - board key.
-     * @param png - base64 PNG, with or without a data-URL prefix.
-     * @returns the saved frame.
-     */
-    save(sessionId: string, png: string): Promise<SavedFrame>;
-}
-/**
- * Create the frame store under the current dsh home.
- * @returns the store; directories are created on the first save.
- */
-export declare function createFrameStore(): FrameStore;
 /** The PNG image metadata an `image` content block carries. */
 export type AttachedImage = Omit<ImageBlock['attachment'], 'mediaType'> & {
     readonly mediaType: 'image/png';
